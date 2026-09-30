@@ -37,6 +37,9 @@
 macOS 亦可 `brew install --cask libreoffice`、Linux/麒麟 `sudo apt install
 libreoffice`。未安装时该维度自动跳过（`.doc` 元数据比对仍可用），其余不受影响。
 
+选机/采购前请先看 [硬件配置要求](docs/硬件配置要求.md)：OCR 为纯 CPU
+推理、无需显卡，内存是第一约束——最低 2 核 / 4GB，推荐 4 核 / 8GB 起。
+
 ## 源码运行（开发 / 无预编译产物平台）
 
 ```bash
