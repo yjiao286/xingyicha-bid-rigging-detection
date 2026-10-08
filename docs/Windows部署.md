@@ -55,7 +55,34 @@ Web 版完全相同。历史记录与上传文件保存在 `%LOCALAPPDATA%\星�
 如需让局域网其他电脑访问：设置环境变量 `HOST=0.0.0.0` 后启动
 （首次会弹出 Windows 防火墙放行提示）。
 
-## 四、常见问题
+## 四、环境变量（低配调优 / 行为微调）
+
+程序全部行为参数走环境变量，默认值即开箱可用；仅在低配机器、大扫描件或
+特殊需求时设置。完整参数表与选型建议见
+[硬件配置要求](硬件配置要求.md)第六节。Windows 设置方法：
+
+**临时（仅当次）**——在命令提示符（cmd）里设置后从同一窗口启动：
+
+```bat
+set OCR_MAX_PAGES=50
+set OCR_TIME_BUDGET=120
+"C:\Program Files\星易查\星易查.exe"
+```
+
+**永久（写入用户环境）**——`Win + R` 输入 `cmd` 回车，执行后**重启星易查**生效：
+
+```bat
+setx OCR_MAX_PAGES 50
+setx PDF_TABLE_LAYOUT off
+```
+
+或图形界面：系统设置 → 「编辑系统环境变量」→ 环境变量 → 用户变量 → 新建。
+常见用途速查：`OCR_MAX_PAGES`/`OCR_TIME_BUDGET`（限制扫描件 OCR 页数/时长）、
+`PDF_TABLE_LAYOUT=off`（不加载表格版面模型，省约 110MB 内存）、
+`EXTRACT_WORKERS=1`（内存极紧张时强制串行）、`MAX_CONTENT_LENGTH_MB`
+（单次上传总量上限）。
+
+## 五、常见问题
 
 - **杀毒软件报毒/拦截**：PyInstaller 打包的 exe 无数字签名，部分杀软会误报。
   在杀软中将 `星易查.exe`（或安装目录）加入信任/白名单即可。代码开源可审计。
@@ -64,13 +91,15 @@ Web 版完全相同。历史记录与上传文件保存在 `%LOCALAPPDATA%\星�
 - **想换端口**：`星易查.exe 5005`（带端口参数启动）。
 - **上传文件在哪**：`%LOCALAPPDATA%\星易查\uploads`（分析完成后可清理）。
 - **历史记录在哪**：`%LOCALAPPDATA%\星易查\history`。
+- **换电脑 / 重装怎么迁移**：整个 `%LOCALAPPDATA%\星易查\` 目录拷贝到新机
+  同路径即可（含历史记录与提取缓存；uploads 里是上传原件，介意体积可不拷）。
 
-## 五、备选：本地 Windows 机器构建（云端不可用时）
+## 六、备选：本地 Windows 机器构建（云端不可用时）
 
 在一台装了 Python 3.11 的 Windows 机器上，双击 `packaging\build_windows.bat`
 即可完成与云端完全相同的构建（产物同样在 `dist\` 下）。生成安装包需另装
 [Inno Setup 6](https://jrsoftware.org/isinfo.php)，只做便携版可跳过。
 
-## 六、Docker 部署（服务器场景）
+## 七、Docker 部署（服务器场景）
 
 仍按仓库根目录 `docker-compose.yml` 使用，与桌面版互不影响。

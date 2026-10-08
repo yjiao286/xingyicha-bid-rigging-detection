@@ -4,7 +4,7 @@ This file provides guidance to AI coding agents (Claude Code, ZCode, Codex, Curs
 
 ## 项目概述
 
-围串标风险识别分析系统（"星易查"）— 基于 Flask 的 Web 应用，通过多维度分析投标文件来检测围标串标行为。依据《中华人民共和国招标投标法实施条例》第四十条。
+围串标风险识别分析系统（"星易查"）— 基于 Flask 的 Web 应用，通过多维度分析投标文件来检测围标串标行为。依据《中华人民共和国招标投标法实施条例》第三十四条、第四十条共 7 类条款判定（详见「Comprehensive Analysis」）。
 
 ## 开发命令
 
@@ -29,11 +29,13 @@ curl -s -o /dev/null -w "%{http_code}" http://localhost:5001/
 lsof -ti:5001 | xargs kill -9
 ```
 
-环境变量：`DEBUG=1`（开启 Flask debug）、`SECRET_KEY`（随机生成）、`MAX_CONTENT_LENGTH_MB`（可选，设置后作为单次上传总上限，413 返回 JSON 错误；**默认不设上限**）、`LOG_LEVEL=INFO`、`OCR_TIME_BUDGET`/`OCR_MAX_PAGES`（扫描件 OCR 预算，**默认 0=完全放开**，可按需限制）、`PDF_TABLE_LAYOUT`（表格通道版面模型档位，`auto` 默认 / `always` / `off`）、`EXTRACT_CACHE`（提取结果缓存，默认 `1` 开；设 `0` 关闭）、`EXTRACT_CACHE_DIR`（缓存目录，默认 `<数据目录>/extract_cache`）、`EXTRACT_CACHE_MAX_FILES=200`（LRU 上限）、`EXTRACT_WORKERS`（并行提取进程数，默认按机型自动定档，见「Extraction Performance」；设了则覆盖自动值）、`EXTRACT_MAX_WORKERS=16`（硬上限）、`ANALYSIS_TIMEOUT=3600`（整体分析超时，需 < gunicorn --timeout）。OCR 依赖（pymupdf + rapidocr_onnxruntime）缺失时扫描件自动跳过，其余功能不受影响。
+环境变量：`DEBUG=1`（开启 Flask debug）、`SECRET_KEY`（随机生成）、`MAX_CONTENT_LENGTH_MB`（可选，设置后作为单次上传总上限，413 返回 JSON 错误；**默认不设上限**）、`LOG_LEVEL=INFO`、`OCR_TIME_BUDGET`/`OCR_MAX_PAGES`（扫描件 OCR 预算，**默认 0=完全放开**，可按需限制）、`PDF_TABLE_LAYOUT`（表格通道版面模型档位，`auto` 默认 / `always` / `off`）、`EXTRACT_CACHE`（提取结果缓存，默认 `1` 开；设 `0` 关闭）、`EXTRACT_CACHE_DIR`（缓存目录，默认 `<数据目录>/extract_cache`）、`EXTRACT_CACHE_MAX_FILES=200`（LRU 上限）、`EXTRACT_WORKERS`（并行提取进程数，默认按机型自动定档，见「Extraction Performance」；设了则覆盖自动值）、`EXTRACT_MAX_WORKERS=16`（硬上限）、`ANALYSIS_TIMEOUT=3600`（整体分析超时，需 < gunicorn --timeout）、`DOCX_IMAGE_OCR=1`（docx 内嵌图片证据 OCR 开关）、`DOCX_IMAGE_OCR_MAX=30`/`DOCX_IMAGE_OCR_BUDGET=90`（每份文件图片张数/时长上限，0=不限）、`DOCX_IMAGE_OCR_MAX_SIDE=2400`（图片 OCR 前降采样长边，0=不缩）、`HISTORY_DIR`（历史记录目录覆盖）、`HOST`/`PORT`（监听地址与端口，桌面版默认 `127.0.0.1`、源码默认 `0.0.0.0`）。OCR 依赖（pymupdf + rapidocr_onnxruntime）缺失时扫描件自动跳过，其余功能不受影响。全部预算参数 0=不限。
 
 ## 桌面版（Windows / Linux / macOS）
 
-`packaging/` 为 PyInstaller + Inno Setup/AppImage/dmg 构建资产，`requirements-desktop.txt`（waitress 替代 gunicorn，gunicorn 不支持 Windows）。云端构建：`.github/workflows/desktop-build.yml` 四组合 matrix（Windows / Ubuntu x86_64 / macOS arm64 / macOS x86_64 后者经 Rosetta），**push `v*` tag 自动三平台构建并发布 GitHub Release**（产物 ASCII 名 `XingYiCha-*`，文件名带版本后缀如 `XingYiCha-Setup-2.2.0.exe`；Release 附件不支持中文文件名）。**版本号唯一来源是 `app.py` 顶部 `APP_VERSION`**：前端 footer 版本标注与静态资源缓存参数（`?v={{ app_version }}`）由模板渲染注入；CI 的「Derive version from app.py」步骤读取它，驱动 Release 产物文件名后缀与 Inno Setup 安装器版本（iss 里的 `#define MyAppVersion` 是兜底值，CI 会覆盖）。发版清单：改 `APP_VERSION` → 手动同步 `packaging/星易查.iss` 与 `packaging/star.spec`（macOS `CFBundleShortVersionString`，此两处无自动同步）→ 更新 README 最新版本链接 → 打 `v*` tag 推送。产物由各平台 job 用 `gh release upload` **直传 Release**（私有库 Actions Artifact 存储配额按月累计、触顶后清空也不解禁，Release 附件通道不受限）；手动 dispatch 可传 `release_tag` 参数把产物补传到指定 Release，无参数的手动运行才走 Artifact（保留 1 天）。`app.py` 冻结适配：`IS_FROZEN` 时资源目录取 `sys._MEIPASS`、数据目录按平台落 `%LOCALAPPDATA%\星易查` / `~/.local/share/星易查` / `~/Library/Application Support/星易查`、强制 stdout UTF-8、waitress + 自动开浏览器 + 端口占用回退 + 单实例探测（`/api/ping` 标记 + `_probe_own_instance`：已有实例在运行则直接拉起页面退出，防止双实例同写 history）；macOS 额外跑 Cocoa 图形层（`_run_macos_gui`：NSApplication 占主线程提供 Dock reopen 回调——点图标/Finder 重开即恢复页面，菜单栏"打开页面/退出"，waitress 转后台 daemon 线程；AppKit 缺失时回落纯控制台模式）。详见 `docs/Windows部署.md` / `docs/Linux部署.md` / `docs/macOS部署.md`。
+`packaging/` 为 PyInstaller + Inno Setup/AppImage/dmg 构建资产，`requirements-desktop.txt`（waitress 替代 gunicorn，gunicorn 不支持 Windows）。云端构建：`.github/workflows/desktop-build.yml` 四组合 matrix（Windows / Ubuntu x86_64 / macOS arm64 / macOS x86_64 后者经 Rosetta），**push `v*` tag 自动三平台构建并发布 GitHub Release**（产物 ASCII 名 `XingYiCha-*`，文件名带版本后缀如 `XingYiCha-Setup-2.2.0.exe`；Release 附件不支持中文文件名）。**版本号唯一来源是 `app.py` 顶部 `APP_VERSION`**：前端 footer 版本标注与静态资源缓存参数（`?v={{ app_version }}`）由模板渲染注入；CI 的「Derive version from app.py」步骤读取它，驱动 Release 产物文件名后缀与 Inno Setup 安装器版本（iss 里的 `#define MyAppVersion` 是兜底值，CI 会覆盖）。发版清单：改 `APP_VERSION` → 手动同步 `packaging/星易查.iss` 与 `packaging/star.spec`（macOS `CFBundleShortVersionString`，此两处无自动同步）→ 更新 README 最新版本链接 → 打 `v*` tag 推送。产物由各平台 job 用 `gh release upload` **直传 Release**（私有库 Actions Artifact 存储配额按月累计、触顶后清空也不解禁，Release 附件通道不受限）；手动 dispatch 可传 `release_tag` 参数把产物补传到指定 Release，无参数的手动运行才走 Artifact（保留 1 天）。`app.py` 冻结适配：`IS_FROZEN` 时资源目录取 `sys._MEIPASS`、数据目录按平台落 `%LOCALAPPDATA%\星易查` / `~/.local/share/星易查` / `~/Library/Application Support/星易查`、强制 stdout UTF-8、waitress + 自动开浏览器 + 端口占用回退 + 单实例探测（`/api/ping` 标记 + `_probe_own_instance`：已有实例在运行则直接拉起页面退出，防止双实例同写 history）；macOS 额外跑 Cocoa 图形层（`_run_macos_gui`：NSApplication 占主线程提供 Dock reopen 回调——点图标/Finder 重开即恢复页面，菜单栏"打开页面/退出"，waitress 转后台 daemon 线程；AppKit 缺失时回落纯控制台模式）。详见 `docs/Windows部署.md` / `docs/Linux部署.md` / `docs/macOS部署.md`（信创环境另有 `docs/银河麒麟部署.md`；选机与调优见 `docs/硬件配置要求.md`）。
+
+另有两条非 CI 的本地产物路径：`build/package.sh`（可重定位 CPython 便携 Linux 包，x64/arm64 双架构，wheelhouse 全量展开 + antiword 提取 + 静态 import 校验，目标机免联网免 Python；与 PyInstaller 产物相互独立）；`launch.sh`（macOS/Linux 开发机一键启动：查端口占用、启动、就绪后自动开浏览器）。
 
 ## 部署源码包
 
@@ -58,13 +60,14 @@ lsof -ti:5001 | xargs kill -9
 
 ## 架构
 
-### 单体应用 (`app.py`，~6300 行)
+### 单体应用 (`app.py`，~8800 行)
 
 所有后端逻辑集中于 `app.py`，无 Blueprint 或模块拆分。代码按功能区段组织，用 `# ── Section ──` 注释分隔：
 
 | 区段 | 功能 |
 |------|------|
 | Helpers | `sanitize_text`、`_find_tool`、`_safe_save`、`_is_within_upload_folder` |
+| Match Normalization | 比对前字符归一化（丢弃空白/零宽字符 + 全角→半角/大小写折叠），**须与 `static/js/main.js` 的 `_SKIP_RE`/`_foldChar()` 保持同步**——两边归一化不一致时前端高亮定位会错位 |
 | Config | `CONFIG` 字典集中管理所有分析阈值 |
 | .doc Conversion | LibreOffice 转换（缓存避免重复启动）；antiword/catdoc 回退 |
 | Metadata Extraction | .docx（XML）、.pdf（PDF info）、.doc（OLE2 + KSO，含值格式验证） |
@@ -77,6 +80,7 @@ lsof -ti:5001 | xargs kill -9
 | Comprehensive Analysis | `run_full_analysis()` + 加权评分 + 协同加分 + 三档结论 |
 | Report Generation | `generate_report_docx()`（概览+文件清单+维度统计+风险摘要 → 四维明细（含严重度排序/人员名单/报价汇总表/分项比对）→ 条款判定汇总表+评分构成+证据明细+评分规则 → 结论+两级处置建议（按结论等级的总体建议 + 按命中条款/银行账号线索动态生成的专项建议）+使用说明 → 附录法条；全部防御式取值，兼容历史精简数据） |
 | Routes | Flask API 端点（流式 NDJSON 进度 + uuid 前缀文件名 + 上传无上限 + 路径校验 + `/api/cancel` 取消机制：`_CANCEL_EVENTS` 注册表 + `AnalysisCancelled` 异常 + 各层检查点） |
+| History & Stats | `_prepare_history_data()` 历史精简留存（`_HISTORY_KEEP` 白名单，见下方注意）+ `get_stats()` 跨记录聚合（结论分布/评分趋势/维度命中数，供统计页） |
 
 ### 分析维度（5 个维度）
 
@@ -92,6 +96,7 @@ lsof -ti:5001 | xargs kill -9
 - `static/css/style.css` — 所有样式（含统计页：KPI 卡片、SVG 环图/趋势图/维度条形图、最近记录表）
 - `static/js/main.js` — 所有前端逻辑（文件上传、流式 NDJSON 进度——含 `pdf_ocr`/`pdf_ocr_start` 扫描件 OCR 进度阶段、结果渲染——含费率报价（`bidRate`）与多值联系人就展示、报告下载、`renderStats()` 统计视图）。人员交叉页：KPI stat-cards（严重度 chips 点击过滤异常卡）+ 各标书属性合并对比表（按原始值判定共享高亮、身份证/银行账号打码点击显示）、人员交叉矩阵（类型过滤 chips、悬停共享行列高亮）+ 按严重度分组可筛选的异常卡片；报价页：KPI 概览卡（文件数/最高/最低/价差%）+ 横向条形图（相同报价标红、缺失键文件以 — 展示且不参与比对）+ 明细表（含费率/下浮率行、数字右对齐等宽、万元换算副行、同值高亮）+ 分项卡可折叠（风险徽标卡默认展开；完全一致/等差数列/高度接近）
 - 图表全部为手写 SVG（无 CDN 依赖，适配内网离线部署）；统计数据来自 `GET /api/stats`
+- 整体流程图（`output/整体流程图mermaid.md` 源 + 根目录 `整体流程图.png` 渲染产物，README 引用）：判定逻辑、条款权重或维度增删时**须同步更新**，曾有流程图权重与代码不一致的回归
 
 ### 文件格式支持
 
@@ -116,6 +121,7 @@ lsof -ti:5001 | xargs kill -9
 | `/api/history/<id>` | GET | 加载指定历史记录（ID 格式白名单校验） |
 | `/api/history/<id>` | DELETE | 删除指定历史记录（格式校验） |
 | `/api/stats` | GET | 聚合所有历史记录生成统计页数据：结论分布、平均评分、按日趋势、四维度命中数、最近记录 |
+| `/api/ping` | GET | 存活探测；桌面版用作单实例标记（`_probe_own_instance` 据此判断已有实例） |
 
 ### 关键配置
 
@@ -126,7 +132,7 @@ lsof -ti:5001 | xargs kill -9
 - `MAX_PDF_PAGES`：0 = 不限页数（默认）；`MAX_FILE_SIZE_MB=300`/`MAX_TOTAL_SIZE_MB=500` 仅 UI 警告不阻止
 - `requirements.txt`：flask, python-docx, pypdf, gunicorn, olefile, openpyxl（xlsx）, pymupdf + rapidocr-onnxruntime（扫描件 OCR 回退）, pymupdf-layout（表格版面分析增强，精确锁 PyMuPDF==1.28.2，可选缺失降级）
 - Docker 镜像基于 `python:3.11-slim`，另安装 `antiword` + `libgl1`（opencv 运行时依赖）+ `fonts-noto-cjk`（OCR 中文字形）
-- 离线验证：`tools/replay_extraction.py <语料目录>` 批量回放文本/人员/报价提取（报告固定写到当前目录 `replay_report.json`）；`tests/test_extraction.py` 单元样本回归（105 例）
+- 离线验证：`tools/replay_extraction.py <语料目录>` 批量回放文本/人员/报价提取（报告固定写到当前目录 `replay_report.json`）；`tests/test_extraction.py` 单元样本回归（172 例，纯 assert 无 pytest 依赖，`t_*` 函数自动发现）
 - 分析结果字段：`pricing.files[].bidRate`（费率/下浮率报价）；`personnel.files[].phones[]/id_numbers[]/emails[]`（多值联系池，前端与 .docx 报告均已展示）；顶层 `project_name`（跨文档投票提取的项目名——标签正则含"项目名称/工程名称/标段名称"等，值经引号书名号剥离/填空下划线剔除/标签词与日期值过滤，≥2 份文档一致优先；`_prepare_history_data` 保留顶层键，旧历史记录缺失时报告命名自动退化）。报告下载名：`围串标风险识别分析报告_[项目名_]判定等级_YYYYMMDD_HHMMSS.docx`（前端优先取 Content-Disposition 的服务端文件名）
 
 ### 围串标信号检测修复（工程类/服务类语料，2026-09-16）

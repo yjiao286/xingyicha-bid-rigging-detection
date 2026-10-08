@@ -43,9 +43,25 @@ tar xzf XingYiCha-linux-x86_64.tar.gz
 
 数据目录：`~/.local/share/星易查/`（history 与 uploads）。
 
-## 四、常见问题
+## 四、环境变量（低配调优 / 行为微调）
+
+默认值即开箱可用，仅按需设置；完整参数表见
+[硬件配置要求](硬件配置要求.md)第六节。终端启动时直接前缀：
+
+```bash
+OCR_MAX_PAGES=50 OCR_TIME_BUDGET=120 ./XingYiCha/XingYiCha
+```
+
+想让桌面图标（AppImage 双击）也带上参数，可包一层 `.desktop` 文件的
+`Exec=` 行，或写入 `~/.profile`：`export PDF_TABLE_LAYOUT=off` 后重新登录。
+
+## 五、常见问题
 
 - **报 libGL.so.1 缺失**：`sudo apt install libgl1`（AppImage 依赖宿主系统库）。
 - **AppImage 无法双击启动**：多数文件管理器需勾选"允许作为程序执行"；命令行 `./` 运行不受限。
+- **让局域网其他电脑访问**：`HOST=0.0.0.0 ./XingYiCha/XingYiCha` 启动，
+  防火墙放行对应端口（`sudo ufw allow 5001`），他机访问 `http://<本机IP>:5001`。
+- **换电脑 / 重装怎么迁移**：整个 `~/.local/share/星易查/` 目录拷到新机同路径。
 - **端口占用**：自动改用 5002-5010，以终端打印的实际地址为准。
-- **Intel 与 ARM 平台**：当前产物为 x86_64；ARM 桌面（如树莓派）暂未构建。
+- **Intel 与 ARM 平台**：预编译产物为 x86_64；ARM（飞腾/鲲鹏等信创环境）走
+  [银河麒麟部署.md](银河麒麟部署.md)第六节源码部署，依赖均提供 aarch64 轮子。
