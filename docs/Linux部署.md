@@ -46,7 +46,7 @@ tar xzf XingYiCha-linux-x86_64.tar.gz
 ## 四、环境变量（低配调优 / 行为微调）
 
 默认值即开箱可用，仅按需设置；完整参数表见
-[硬件配置要求](硬件配置要求.md)第六节。终端启动时直接前缀：
+[硬件配置要求](硬件配置要求.md)第七节。终端启动时直接前缀：
 
 ```bash
 OCR_MAX_PAGES=50 OCR_TIME_BUDGET=120 ./XingYiCha/XingYiCha
