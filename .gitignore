@@ -47,3 +47,8 @@ output/replay_*
 
 # 提取结果缓存（按文件内容哈希，可安全删除）
 extract_cache/
+
+# 敏感信息守卫（本机资产：脚本内含拦截词表/干字表，禁止入库）
+tools/check_sensitive.py
+tools/install-hooks.sh
+tools/sensitive-terms.example.txt
