@@ -2367,12 +2367,24 @@ def t_ref_derived_short_identifier_segment():
            '具体内容详见第五章采购需求全部条款与附件说明。')
     ta = '我公司参加贵司组织的、WFWJ-070020260602108-BG-1（ZC26G230223）招标'
     tb = '我公司参加贵司组织的、WFWJ-070020260602108-BG-1（ZC26G230225）招标'
-    assert m._REF_DERIVED_MIN_LEN <= 35, '门槛被调回将复现 WFWJ 漏检'
+    assert m._REF_DERIVED_MIN_LEN <= 25, '门槛被调回将复现 WFWJ/经验要求段漏检'
     r = m.text_similarity_analysis({'甲.docx': ta, '乙.docx': tb}, ref_texts_list=[ref])
     pr = r['pair_results'][0]
     seg = max(pr['matches'], key=lambda x: x.get('length', 0))
     assert seg['risk_level'] == 'template', (seg['risk_level'], seg['text'][:50])
     assert pr['abnormal_count'] == 0, [(x['risk_level'], x['text'][:40]) for x in pr['matches']]
+
+    # 第二款形态：招标文件人员配置表要求原文（28 字符）——标书加'具备'前缀
+    # 照抄、截在两家措辞分歧点（'…配餐项目经理经验' vs '…配餐经验'），
+    # 38 字符门槛时代实测漏成高风险；包含率 0.92。
+    ref2 = ('项目经理 | 大专（含）以上学历 | 5年以上相关项目管理经验或2年以上'
+            '1000人规模配餐项目经理经验 | 岗位职责：负责整体运营与协调。')
+    tA = '配备要求：具备5年以上相关项目管理经验或2年以上1000人规模配餐项目经理经验。'
+    tB = '配备要求：具备5年以上相关项目管理经验或2年以上1000人规模配餐经验。'
+    r2 = m.text_similarity_analysis({'甲.docx': tA, '乙.docx': tB}, ref_texts_list=[ref2])
+    pr2 = r2['pair_results'][0]
+    assert pr2['abnormal_count'] == 0, [(x['risk_level'], x['text'][:40]) for x in pr2['matches']]
+    assert r2['ref_derived_count'] >= 1, r2['ref_derived_count']
 
 
 def t_std_listing_number_plus_name_word():
