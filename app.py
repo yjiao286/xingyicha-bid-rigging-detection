@@ -33,7 +33,7 @@ import threading
 #   - 前端 footer 版本标注与静态资源缓存参数（?v=）由模板渲染注入；
 #   - 桌面版 Release 产物文件名后缀、Inno Setup 安装器版本由 CI 从此处
 #     读取（desktop-build.yml「Derive version from app.py」）。
-APP_VERSION = '2.2.1'
+APP_VERSION = '2.2.2'
 
 # ── Frozen (PyInstaller) detection ──────────────────────────────
 # When bundled as a desktop exe, templates/static live inside the bundle
@@ -74,6 +74,17 @@ _max_body_mb = os.environ.get('MAX_CONTENT_LENGTH_MB')
 if _max_body_mb:
     _max_body_mb = int(_max_body_mb)
     app.config['MAX_CONTENT_LENGTH'] = _max_body_mb * 1024 * 1024
+
+# Waitress (desktop builds) rejects request bodies over 1GB by default at the
+# server layer, before Flask ever sees the request: the JSON 413 from
+# _too_large below never gets sent, and an in-flight oversize upload is cut
+# off mid-body, which the browser surfaces as a bare "Failed to fetch". Raise
+# waitress's own cap to match the "unlimited by default" policy above — 32GB
+# when no Flask cap is set; 2x MAX_CONTENT_LENGTH_MB when one is, so oversize
+# requests still reach Flask and get the actionable JSON error.
+_waitress_max_body_bytes = (
+    _max_body_mb * 2 * 1024 * 1024 if _max_body_mb else 32 * 1024 * 1024 * 1024
+)
 
 
 @app.errorhandler(413)
@@ -8713,7 +8724,8 @@ def _run_macos_gui(url, host, port):
 
     def _serve():
         try:
-            serve(app, host=host, port=port, threads=8)
+            serve(app, host=host, port=port, threads=8,
+                  max_request_body_size=_waitress_max_body_bytes)
         except Exception as exc:
             print(f'  服务器线程异常退出: {exc}')
 
@@ -8812,6 +8824,7 @@ if __name__ == '__main__':
             # threaded request handling, same as the Flask dev server.
             from waitress import serve
             print('  服务器: waitress (threads=8)')
-            serve(app, host=host, port=port, threads=8)
+            serve(app, host=host, port=port, threads=8,
+                  max_request_body_size=_waitress_max_body_bytes)
         except ImportError:
             app.run(debug=debug, host=host, port=port, threaded=True)

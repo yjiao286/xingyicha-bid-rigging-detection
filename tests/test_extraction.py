@@ -2089,6 +2089,47 @@ def t_app_version_consistent_across_release_surfaces():
         assert f"'CFBundleShortVersionString': '{ver}'" in f.read(), 'star.spec 版本未同步'
 
 
+def t_waitress_body_cap_matches_upload_policy():
+    # 桌面版 waitress 原生 max_request_body_size 默认仅 1GB，且在服务器层
+    # 拦截、到不了 Flask：>1GB 的批次（多份扫描件标书很常见）要么收到
+    # waitress 裸 413（前端落到"上传文件过大"兜底文案），要么上传中途
+    # 连接被掐断（前端报 Failed to fetch）。修复是 serve() 显式放宽该值：
+    # 未设 Flask 上限时 32GB；设了 MAX_CONTENT_LENGTH_MB 时取 2 倍，让
+    # 超限请求穿到 Flask、由 _too_large 返回带具体限额的 JSON。
+    import importlib.util
+
+    from waitress.adjustments import Adjustments
+
+    assert 'MAX_CONTENT_LENGTH_MB' not in os.environ, '测试环境须不设该变量'
+    assert m._waitress_max_body_bytes == 32 * 1024 * 1024 * 1024
+    # kwarg 必须真实被 waitress 接受：拼错参数名/非法值会在 Adjustments
+    # 构造时抛错，而 serve(**kw) 透传在启动时才会暴露——静默回退 1GB
+    # 上限正是本 bug 的回归形态。
+    adj = Adjustments(max_request_body_size=m._waitress_max_body_bytes)
+    assert adj.max_request_body_size == m._waitress_max_body_bytes
+
+    # 限额档：隔离加载一份设了 MAX_CONTENT_LENGTH_MB 的 app 模块验证
+    # 2 倍关系（不能用 reload：会把 EXTRACT_CACHE_ENABLED 等测试密闭性
+    # 设置重置回默认）。
+    key = 'MAX_CONTENT_LENGTH_MB'
+    saved = os.environ.get(key)
+    os.environ[key] = '500'
+    try:
+        app_path = os.path.join(os.path.dirname(os.path.abspath(m.__file__)), 'app.py')
+        spec = importlib.util.spec_from_file_location('app_capped_for_test', app_path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        assert mod.app.config['MAX_CONTENT_LENGTH'] == 500 * 1024 * 1024
+        assert mod._waitress_max_body_bytes == 1000 * 1024 * 1024, \
+            'waitress 上限须取 Flask 上限 2 倍，超限请求才能穿到 Flask'
+        assert mod._waitress_max_body_bytes > mod.app.config['MAX_CONTENT_LENGTH']
+    finally:
+        if saved is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = saved
+
+
 def main():
     # Tests must be hermetic: the extraction cache lives on disk between runs,
     # and a cached PDF extraction silently skips the very code path a test
