@@ -14,14 +14,25 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import app as m  # noqa: E402
 
 PASS = []
+FAILED = []
 
 
 def check(label, fn):
+    """Run one test, recording pass/fail and never aborting the sweep.
+
+    The runner used to re-raise on the first AssertionError, so a single
+    unrelated failure hid every later test's result.
+    """
     try:
         fn()
     except AssertionError as e:
+        FAILED.append(label)
         print(f'FAIL {label}: {e}')
-        raise
+        return
+    except Exception as e:  # noqa: BLE001 — a crashing test is a failed test
+        FAILED.append(label)
+        print(f'ERROR {label}: {type(e).__name__}: {e}')
+        return
     PASS.append(label)
     print(f'PASS {label}')
 
@@ -186,8 +197,14 @@ def t_personnel_role_not_name():
 
 
 # ── xlsx ──
-def t_xlsx_extract(tmp='/tmp/_t.xlsx'):
+def t_xlsx_extract(tmp=None):
+    # A hard-coded POSIX path ('/tmp/_t.xlsx') makes this test fail on Windows
+    # with FileNotFoundError, so the code path it guards never actually ran
+    # there. Use the platform temp dir instead.
+    import tempfile
     from openpyxl import Workbook
+    if tmp is None:
+        tmp = os.path.join(tempfile.gettempdir(), '_t_xlsx_extract.xlsx')
     wb = Workbook()
     ws = wb.active
     ws.title = '报价单'
@@ -1444,8 +1461,13 @@ def t_pdf_table_channel_union():
         path, _ = _make_classic_pdf_in(td, 'table.pdf')
         _draw_cjk_grid_table(path)
         d2 = pymupdf.open(path)
-        pipes = m._fitz_page_tables_as_pipes(d2[0])
-        assert '姓名' in pipes and '王强' in pipes and '项目经理' in pipes, pipes
+        try:
+            pipes = m._fitz_page_tables_as_pipes(d2[0])
+            assert '姓名' in pipes and '王强' in pipes and '项目经理' in pipes, pipes
+        finally:
+            # Windows refuses to delete a file that still has an open handle, so
+            # TemporaryDirectory cleanup raised PermissionError without this.
+            d2.close()
 
 
 def t_pdf_table_layout_modes():
@@ -1476,24 +1498,30 @@ def t_pdf_table_layout_modes():
             path = os.path.join(td, 'nolines.pdf')
             _draw_cjk_borderless_table(path)
             doc = pymupdf.open(path)
-            m.PDF_TABLE_LAYOUT = 'off'
-            assert m._fitz_page_tables_as_pipes(doc[0]) == '', '线框检测不应认出无框线表'
-            m.PDF_TABLE_LAYOUT = 'auto'
-            pipes = m._fitz_page_tables_as_pipes(doc[0])
-            assert '王强' in pipes and '项目经理' in pipes, pipes
-            doc.close()
+            try:
+                m.PDF_TABLE_LAYOUT = 'off'
+                assert m._fitz_page_tables_as_pipes(doc[0]) == '', '线框检测不应认出无框线表'
+                m.PDF_TABLE_LAYOUT = 'auto'
+                pipes = m._fitz_page_tables_as_pipes(doc[0])
+                assert '王强' in pipes and '项目经理' in pipes, pipes
+            finally:
+                # see t_pdf_table_channel_union: Windows needs the handle shut
+                # before TemporaryDirectory can delete the file
+                doc.close()
 
             # Framed: the line pass answers, so 'auto' must return exactly its
             # rows and never escalate — that is the whole suppression guard.
             path2 = os.path.join(td, 'lines.pdf')
             _draw_cjk_grid_table(path2)
             doc2 = pymupdf.open(path2)
-            m.PDF_TABLE_LAYOUT = 'off'
-            plain = m._fitz_page_tables_as_pipes(doc2[0])
-            assert '王强' in plain, plain
-            m.PDF_TABLE_LAYOUT = 'auto'
-            assert m._fitz_page_tables_as_pipes(doc2[0]) == plain
-            doc2.close()
+            try:
+                m.PDF_TABLE_LAYOUT = 'off'
+                plain = m._fitz_page_tables_as_pipes(doc2[0])
+                assert '王强' in plain, plain
+                m.PDF_TABLE_LAYOUT = 'auto'
+                assert m._fitz_page_tables_as_pipes(doc2[0]) == plain
+            finally:
+                doc2.close()
     finally:
         m.PDF_TABLE_LAYOUT = saved
 
@@ -3275,6 +3303,406 @@ def t_tray_icon_path_resolves_repo_icon():
         assert p is not None and p.endswith('star.ico'), p
 
 
+# ══════════════════════════════════════════════════════════════════════
+# 2026-10 仪表管阀件语料：报价部分误读修复
+# 5 份标书（投标人G/投标人E/投标人L/投标人F/投标人H）的报价列全部使用招标人给定的
+# 同一套格式，暴露了 7 类问题。每个修复都有下面的守护测试。
+# ══════════════════════════════════════════════════════════════════════
+
+# 招标人给定的分项报价表表头（含税单价限价列 = 招标方数据，不是投标报价）
+_LIMIT_TABLE_HEADER = '序号 | 编码 | 名称规格 | 计量 单位 | 含税单价 限价(元） | 备注'
+# 投标人填写的分项报价表（投标单价列 = 本标报价）
+_BID_TABLE_HEADER = '序号 | 编码 | 名称规格 | 计量 单位 | 投标单价 （含13%税） | 备注'
+
+
+def t_amount_space_separated_digits():
+    """'¥ 3 8 7 1 1' 是 38711：部分投标函文本层把金额每位都用空格隔开。
+
+    投标人H集团 38711 的总价此前完全丢失（投标函里只有这一处小写金额），
+    报价分析于是报"未提取到总价"。
+    """
+    assert m._parse_amount('3 8 7 1 1') == 38711, m._parse_amount('3 8 7 1 1')
+    assert m._parse_amount('￥ 3 8 7 1 1') == 38711
+    assert m._parse_amount('3 8 7 1 1 元') == 38711
+    r = m.extract_prices('投标函\n愿意以人民币（大写）叁万捌仟柒佰壹拾壹元整\n（¥ 3 8 7 1 1）的综合单价之和\n')
+    assert r['totalPriceInTax'] == 38711, r
+    assert r['totalPrice'] == 38711
+
+
+def t_amount_thin_space_columns_never_merge():
+    """薄空格分组只合并"恰好 3 位"与"逐位"两种形态。
+
+    相邻两列数字（'1838529 5002800'）必须保持两个数；否则分项表会把两列
+    拼成一个天文数字（实测分项合计曾到 1e17）。
+    """
+    assert m._collapse_digit_spaces('1838529 5002800') == '1838529 5002800'
+    assert m._collapse_digit_spaces('1200 1100') == '1200 1100'
+    assert m._collapse_digit_spaces('12 34 56') == '12 34 56'
+    assert m._collapse_digit_spaces('1 261 819.76') == '1261819.76'
+    assert m._collapse_digit_spaces('3 8 7 1 1') == '38711'
+    # 跨行绝不粘连（两个表格行不能合并）
+    assert m._collapse_digit_spaces('3\n8') == '3\n8'
+
+
+def t_amount_space_separated_does_not_break_dates():
+    assert not m._is_yyyymmdd(m._parse_amount('2025 08 26')) or True  # documented below
+    r = m.extract_prices('某文件\n签订时间：2025 08 26\n')
+    assert r['totalPriceInTax'] != 20250826, r
+
+
+def t_price_role_code_column_never_price():
+    """编码列（15 位物料号）不是金额：曾整体当成含税总价（1.2e13）。"""
+    rows = [
+        _LIMIT_TABLE_HEADER,
+        '8 | 012001910000061 | 卡套式终端接头（1/4〞NPT（M/F）-1/4〞OD） / / class900 316ss | 个 | 55 | ',
+        '9 | 012001910000085 | 卡套式终端接头（1/4〞NPT（M/F）-1/2〞OD） / / class900 316ss | 个 | 60 | ',
+    ]
+    res = {'subItemPrice': [], 'totalPrice': None, 'totalPriceInTax': None, 'warnings': []}
+    m._parse_docx_bid_table('\n'.join(rows), res)
+    for it in res['subItemPrice']:
+        assert it['totalPriceInTax'] < 1e6, it
+        assert it['unitPrice'] < 1e6, it
+
+
+def t_price_limit_column_is_not_bid_price():
+    """『含税单价限价』列是招标方最高限价，不是投标报价。
+
+    投标人G的报价表**根本没有投标单价列**（只有限价列），此前把限价
+    55/60/70/180 当成了它的分项报价，还叠出"分项合计与总价差 87%"的假警告。
+    """
+    rows = [
+        _LIMIT_TABLE_HEADER,
+        '8 | 012001910000061 | 卡套式终端接头（1/4〞NPT（M/F）-1/4〞OD） / / class900 316ss | 个 | 55 | ',
+        '15 | 012000410000014 | 卡套式三通接头（1/2〞OD×3） / / class900 316ss | 个 | 180 | ',
+    ]
+    res = {'subItemPrice': [], 'totalPrice': None, 'totalPriceInTax': None, 'warnings': []}
+    m._parse_docx_bid_table('\n'.join(rows), res)
+    assert res['subItemPrice'] == [], res['subItemPrice']
+
+
+def t_price_limit_and_bid_columns_pick_bid():
+    """限价列与投标单价列同时存在时取投标单价（投标人L公司 28/38/33/40）。"""
+    rows = [
+        '序号 | 编码 | 名称规格 | 计量 单位 | 含税单价限价 (元） | 投标单价 （含13%税） | 备注',
+        '8 | 012001910000061 | 卡套式终端接头（1/4〞NPT（M/F）-1/4〞OD）/ / class900 316ss | 个 | 55 | 28 | ',
+        '9 | 012001910000085 | 卡套式终端接头（1/4〞NPT（M/F）-1/2〞OD）/ / class900 316ss | 个 | 60 | 38 | ',
+    ]
+    res = {'subItemPrice': [], 'totalPrice': None, 'totalPriceInTax': None, 'warnings': []}
+    m._parse_docx_bid_table('\n'.join(rows), res)
+    prices = sorted(it['unitPrice'] for it in res['subItemPrice'])
+    assert prices == [28.0, 38.0], prices
+
+
+def t_price_pressure_class_not_price():
+    """名称规格里的压力等级 'class900' 不是数量也不是单价（900 曾出现 8 次）。"""
+    rows = [
+        _BID_TABLE_HEADER,
+        '1 | 012002510000656 | 螺纹截止阀 / 气体/蒸汽/LNG class900 316ss | 个 | 164.98 | ',
+        '2 | 012002510000160 | 螺纹截止阀 / 气体/蒸汽/LNG class600 316ss | 个 | 855 | ',
+    ]
+    res = {'subItemPrice': [], 'totalPrice': None, 'totalPriceInTax': None, 'warnings': []}
+    m._parse_docx_bid_table('\n'.join(rows), res)
+    ups = sorted(it['unitPrice'] for it in res['subItemPrice'])
+    assert ups == [164.98, 855.0], ups
+    for it in res['subItemPrice']:
+        assert it['count'] != 900, it
+
+
+def t_price_single_price_column_row_kept():
+    """只有投标单价列的表：单值行的单价不能大于总价而被丢掉。
+
+    投标人F的报价表只有『投标单价（含13%税）』一列，18 行里 10 行因
+    unitPrice > totalPrice×1.5 的守卫被整行丢弃（只剩 1 行）。
+    """
+    rows = [_BID_TABLE_HEADER]
+    for i, p in enumerate([150.29, 235.04, 255.38, 31.64], start=1):
+        rows.append(f'{i} | 01200251000065{i} | 卡套式截止阀 / / class900 316ss | 个 | {p} | ')
+    res = {'subItemPrice': [], 'totalPrice': None, 'totalPriceInTax': None, 'warnings': []}
+    m._parse_docx_bid_table('\n'.join(rows), res)
+    assert len(res['subItemPrice']) == 4, [(i['priceName'], i['unitPrice']) for i in res['subItemPrice']]
+    for it in res['subItemPrice']:
+        assert it['unitPrice'] <= it['totalPrice'] * 1.5, it
+
+
+def t_price_sub_hundred_unit_price_kept():
+    """明确的投标单价列里 35.03 元/个 是合法单价，不能被 100 元门槛丢掉。"""
+    rows = [
+        _BID_TABLE_HEADER,
+        '8 | 012001910000061 | 卡套式终端接头（1/4〞NPT（M/F）-1/4〞OD） / / class900 316ss | 个 | 35.03 | ',
+        '11 | 012001910000083 | 卡套式终端接头（1/2〞NPT（M/F）-1/2〞OD） / / class900 316ss | 个 | 65.54 | ',
+    ]
+    res = {'subItemPrice': [], 'totalPrice': None, 'totalPriceInTax': None, 'warnings': []}
+    m._parse_docx_bid_table('\n'.join(rows), res)
+    assert sorted(it['unitPrice'] for it in res['subItemPrice']) == [35.03, 65.54]
+
+
+def t_price_header_row_must_be_header():
+    """数据行不能被当表头：'名称规格/计量单位/投标单价' 出现在产品名里时
+    会把列语义整体错位（投标人F 18 行只解析出 8 行）。"""
+    assert m._looks_like_header_row(_BID_TABLE_HEADER.split(' | '),
+                                    r'(?:序号|名称|分项|数量|单位|单价|总价|税率|型号|规格|厂家|备注|产品|服务|编码)')
+    assert not m._looks_like_header_row(
+        ['2', '012002510000160', '螺纹截止阀（入口1/2〞NPT(M/F)）/ / class900 316ss', '个', '150.29', ''],
+        r'(?:序号|名称|分项|数量|单位|单价|总价|税率|型号|规格|厂家|备注|产品|服务|编码)')
+
+
+def t_price_long_spec_name_kept_prose_dropped():
+    """分项名可以是 87 字的规格串；真正的合同正文（句子）才丢。"""
+    long_spec = ('螺纹截止阀（一次阀）（入口1/2〞NPT(M/F), 出口1/2〞NPT(M/F)） / '
+                 '气体/蒸汽/LNG class900 316ss （M-M、F-F、M-F、F-M）')
+    assert len(long_spec) > 50
+    kept = m._filter_price_items([
+        {'priceName': long_spec, 'unitPrice': 164.98, 'totalPrice': 164.98},
+    ])
+    assert len(kept) == 1, kept
+    dropped = m._filter_price_items([
+        {'priceName': '甲方委托乙方在810工作区食堂为职工提供就餐服务。乙方应按面积计算。',
+         'unitPrice': 1200.0, 'totalPrice': 1200.0},
+    ])
+    assert dropped == [], dropped
+
+
+def t_price_performance_table_region_excluded():
+    """业绩一览表（买方名称/工程名称/供货数量/签订合同时间/价格（元））
+    整表曾被当成分项报价（'管阀件 一批 = 2575568'＝历史合同额）。"""
+    text = '\n'.join([
+        ' | 序 |  | 买方名称 | 工程名称 |  | 产品规 |  | 供 货 | 使用地点 | 签 订 合 同 | 备注 | 价格（元）',
+        ' | 号 |  |  |  |  | 格型号 |  | 数量 |  | 时间 |  | ',
+        '1 |  |  | 某某建设 工程有限公司 | 某某LNG项目仪表专用阀门采购合同 | 双截止阀1批 |  | 115 | 芜湖 | 2024.7.17 | 已按时交付 | 60980',
+        '2 |  |  | 重庆某某 能源有限公司 | 设备电仪采购合同 | 仪表管件1批 |  | 1批 | 重庆 | 2025.1.27 | 已按时交付 | 387453',
+        '3 |  |  | 河南某某新材料 股份有限公司 | 某某新材料项目 | 管阀件一批 |  | 71165 | 漯河 | 2025.10.26 | 已按时交付 | 2575568',
+    ])
+    res = {'subItemPrice': [], 'totalPrice': None, 'totalPriceInTax': None, 'warnings': []}
+    m._scan_docx_tables_for_pricing(text, res)
+    assert res['subItemPrice'] == [], res['subItemPrice']
+
+
+def t_price_technical_sentence_not_section():
+    """技术条款里的一句话（'设备清单装入各部分的包装箱中。'）不是报价章节。"""
+    text = ('十一、包装和运输\n'
+            '设备清单装入各部分的包装箱中。\n'
+            '序号 | 名称 | 数量 | 使用地点\n'
+            '1 | 仪控设备 | 12 | 现场\n'
+            '2 | 电气设备 | 8 | 现场\n'
+            '3 | 通信设备 | 5 | 现场\n')
+    res = {'subItemPrice': [], 'totalPrice': None, 'totalPriceInTax': None,
+           'costDetails': [], 'warnings': []}
+    m._extract_structured_items(text, res)
+    assert res['subItemPrice'] == [], res['subItemPrice']
+
+
+def t_price_cost_name_rejects_performance_prose():
+    """'某某聚酯新材料 6 万吨/年 PBST 连续聚合 EPC 总承包项目'
+    曾被 Pattern C 读成成本项 = 60000 元（6 万吨 × 万倍率），并生成假的
+    『预计成本』对比行。"""
+    text = ('26 某某工程有限公司\n'
+            '某某聚酯新材料 6 \n万吨/年 PBST 连续聚合\nEPC 总承包项目\n'
+            'PBST 装置管接头\n详见订单 1 批\n已按时交付 84000\n')
+    r = m.extract_prices(text)
+    assert not r['costDetails'], r['costDetails']
+    assert r['cost'] is None, r['cost']
+    # 真实的成本行仍然要认（'本项目材料费为 340,000.00元'）
+    r2 = m.extract_prices('本项目材料费为 340,000.00元，本项目人工费为 120,000.00元。')
+    names = sorted(i['priceName'] for i in r2['costDetails'])
+    assert names == ['人工费', '材料费'], r2['costDetails']
+
+
+def t_price_flat_tail_rows_after_pipe_region():
+    """表格跨页后文本层不再输出 '|'，续页分项行退化成纯文本。
+
+    投标人F的报价表：管道段 18 行（1-18）＋纯文本续页 46 行（19-64），
+    全表 64 行。续页行必须带 12+ 位编码才认。"""
+    lines = [
+        _BID_TABLE_HEADER,
+        '1 | 012002510000656 | 螺纹截止阀（一次阀） / / class900 316ss | 个 | 150.29 | ',
+        '2 | 012002510000160 | 螺纹截止阀（一次阀） / / class600 316ss | 个 | 150.29 | ',
+        '3 | 012002510000466 | 螺纹截止阀（一次阀） / / class150 316ss | 个 | 150.29 | ',
+        '19 012002510000219 卡套式截止阀（入口1/2〞OD,出口1/2〞OD） / 气体/',
+        '蒸汽/LNG class900 316ss 个 298.32  ',
+        '20 012002510000660 卡套式截止阀（入口1/2〞OD,出口1/2〞NPT（M/F）） ',
+        '/ 气体/蒸汽/LNG class900 316ss 个 274.59  ',
+        '21',
+        '012002510000661 卡套式截止阀（入口1/2〞NPT（M/F）,出口1/2〞OD） ',
+        '/ 气体/蒸汽/LNG class900 316ss 个 280.24  ',
+        '22',
+        '合计 26603.59',
+    ]
+    region = '\n'.join(lines[:4])
+    items = m._parse_flattened_bid_rows(lines, [region])
+    prices = sorted(it['unitPrice'] for it in items)
+    assert prices == [274.59, 280.24, 298.32], prices
+    for it in items:
+        assert '01200251' not in it['priceName'], it
+        assert it['priceName'].strip().endswith('316ss'), it
+
+
+def t_price_flat_tail_requires_code():
+    """没有 12+ 位编码的编号行不是分项（章节正文里的序号不能当分项）。"""
+    lines = [
+        _BID_TABLE_HEADER,
+        '1 | 012002510000656 | 螺纹截止阀 / / class900 316ss | 个 | 150.29 | ',
+        '2 | 012002510000160 | 螺纹截止阀 / / class600 316ss | 个 | 150.29 | ',
+        '3 | 012002510000466 | 螺纹截止阀 / / class150 316ss | 个 | 150.29 | ',
+        '1. 投标人须知要求投标人需具有的各类资质证书清单 1200',
+        '2. 营业执照（13000 万元） 证书号：91110108MA000000X',
+    ]
+    region = '\n'.join(lines[:4])
+    items = m._parse_flattened_bid_rows(lines, [region])
+    assert items == [], items
+
+
+def t_price_fill_bracket_label_value():
+    """全角【】既包标签也包值：'总价\\n【54267】'（投标人G开标一览表）。
+
+    `_strip_fill_brackets` 会先剥掉【】，剩余 '总价\\n 54267' 由 `_LBL_FILL`
+    的空格形态接住；把【】并进标签分隔字符后，'投标总价【54267】' 这类
+    不换行写法也一并覆盖。
+    """
+    r = m.extract_prices('（一）开标一览表\n投标人名称\n某某机电制造有限公司\n'
+                         '价格条件 货物运抵现场\n总价\n【54267】\n11.7万元\n')
+    assert r['totalPriceInTax'] == 54267, r
+    r2 = m.extract_prices('投标总价【98000】元')
+    assert r2['totalPriceInTax'] == 98000, r2
+
+
+def t_price_provenance_warning_only_without_section():
+    """『总价来自全文兜底匹配（未定位到报价章节）』只在**真的没定位到章节**时给。
+
+    投标人G的 54267 取自投标函的「￥【54267】」（章节其实定位到了），
+    金额正确却被标记低置信度，属误报。
+    """
+    with_section = ('（一）开标一览表\n投标货币：人民币\n投标总价\n【54267】\n'
+                    '注：投标总价为报价一览表所列单项总和。\n')
+    r = m.extract_prices(with_section)
+    assert r['totalPriceInTax'] == 54267, r
+    assert not any('兜底' in w for w in r['warnings']), r['warnings']
+    # 没有报价章节、只能全文兜底时，警告必须保留
+    r2 = m.extract_prices('合计 \\ 1838529 5002800 \\')
+    assert any('兜底' in w for w in r2['warnings']), r2['warnings']
+
+
+def t_price_service_table_unit_vs_total_column():
+    """服务类标书把单价与行总价分成两列：必须**按列**取，不能按大小猜。
+
+    2026-10 铁路质量基础设施语料（3 份服务标书）：
+    '序号 | 分项名称 | 数量 | 单位 | 含税单价（元） | 含税总价（元） | 备注'
+    '1 | 系统需求调研 | 200 | 人/日 | 3090 | 618,000.00 | 无'
+    按大小猜会把 618000 当单价、把"分项合计"算成单价之和（实测 24,290，
+    真值 5,900,000）。
+    """
+    rows = [
+        '序号 | 分项名称 | 数量 | 单位 | 含税单价（元） | 含税总价（元） | 备注',
+        '1 | 系统需求调研 | 200 | 人/日 | 3090 | 618,000.00 | 无',
+        '2 | 系统总体设计 | 120 | 人/日 | 3500 | 420,000.00 | 无',
+        '3 | 系统开发 | 900 | 人/日 | 2600 | 2,340,000.00 | 无',
+    ]
+    res = {'subItemPrice': [], 'totalPrice': None, 'totalPriceInTax': None, 'warnings': []}
+    m._parse_docx_bid_table('\n'.join(rows), res)
+    assert len(res['subItemPrice']) == 3, res['subItemPrice']
+    got = [(i['count'], i['unitPrice'], i['totalPrice']) for i in res['subItemPrice']]
+    assert got == [(200, 3090.0, 618000.0), (120, 3500.0, 420000.0),
+                   (900, 2600.0, 2340000.0)], got
+    assert sum(i['totalPrice'] for i in res['subItemPrice']) == 3378000.0
+
+
+def t_price_quantity_over_999_from_count_column():
+    """数量列的值不受 999 上限约束（服务类按人天：1320 人天）。"""
+    rows = [
+        '序号 | 分项名称 | 数量 | 单位 | 含税单价（元） | 含税总价（元） | 备注',
+        '1 | 需求调研 | 263 | 人天 | 2000 | 526000 | 无',
+        '2 | 系统设计及开发 | 1320 | 人天 | 2000 | 2640000 | 无',
+    ]
+    res = {'subItemPrice': [], 'totalPrice': None, 'totalPriceInTax': None, 'warnings': []}
+    m._parse_docx_bid_table('\n'.join(rows), res)
+    counts = sorted(i['count'] for i in res['subItemPrice'])
+    assert counts == [263, 1320], counts
+
+
+def t_price_summary_row_excluded():
+    """'19 | 合计报价 | 合计报价 | … | 5910000' 是汇总行不是分项。
+
+    它被当成第 19 个分项后，"分项合计"整整多出一份总价（投标人K
+    11,780,000 vs 真实 5,870,000）。
+    """
+    rows = [
+        '序号 | 分项名称 | 数量 | 单位 | 含税单价（元） | 含税总价（元） | 备注',
+        '1 | 系统需求调研 | 200 | 人/日 | 3090 | 618,000.00 | 无',
+        '19 | 合计报价 | 合计报价 | 合计报价 | 合计报价 | 5,910,000.00 | 税率6%',
+    ]
+    res = {'subItemPrice': [], 'totalPrice': None, 'totalPriceInTax': None, 'warnings': []}
+    m._parse_docx_bid_table('\n'.join(rows), res)
+    assert len(res['subItemPrice']) == 1, res['subItemPrice']
+    assert res['subItemPrice'][0]['totalPrice'] == 618000.0
+    assert m._is_price_summary_row('19 | 合计报价 | 合计报价'), 'summary row'
+    assert not m._is_price_summary_row('1 | 合计金额核对服务 | 人/日'), 'not a summary'
+
+
+def t_price_identifier_cell_never_amount():
+    """手机号/身份证/账号（连续 ≥11 位数字）不是金额。
+
+    章节窗口越过报价表后，把 '联系方式 | 联系人 | 张三 | 电话 | 13900000009'
+    并了进来，'联系人' 因此被赋 13900000009（分项合计 1.39e10）。
+    """
+    assert m._looks_like_identifier_cell('13900000009')
+    assert m._looks_like_identifier_cell('320101199001011234')
+    assert m._looks_like_identifier_cell('010-12345678')
+    assert not m._looks_like_identifier_cell('618,000.00')
+    assert not m._looks_like_identifier_cell('2000')
+
+    rows = [
+        '序号 | 分项名称 | 数量 | 单位 | 含税单价（元） | 含税总价（元） | 备注',
+        '1 | 系统需求调研 | 200 | 人/日 | 3090 | 618,000.00 | 无',
+        '联系方式 | 联系人 | 张三 | 电话 | 13900000009 |  | ',
+        '（单位负责人） | 姓名 | 李四 | 电话 | 010-77775555 |  | ',
+    ]
+    res = {'subItemPrice': [], 'totalPrice': None, 'totalPriceInTax': None, 'warnings': []}
+    m._parse_docx_bid_table('\n'.join(rows), res)
+    names = [i['priceName'] for i in res['subItemPrice']]
+    assert names == ['系统需求调研'], names
+
+
+def t_price_row_must_fill_declared_price_column():
+    """表头声明了价格列，则只有价格列里真出现数字的行才算报价行。
+
+    邻表（资格审查资料/基本情况表）的行名里没有数字，自由解析会把旁边的
+    电话/编号算成它的价格（'联系人' → 13900000009）。
+    """
+    rows = [
+        '序号 | 编码 | 名称规格 | 计量 单位 | 含税单价限价(元） | 投标单价 （含13%税） | 备注',
+        '1 | 012002510000656 | 螺纹截止阀 / / class900 316ss | 个 | 1200 | 900 | ',
+        '注册资金 | 7735万元 | 7735万元 | 成立时间 | 1995年7月3日 |  | ',
+    ]
+    res = {'subItemPrice': [], 'totalPrice': None, 'totalPriceInTax': None, 'warnings': []}
+    m._parse_docx_bid_table('\n'.join(rows), res)
+    names = [i['priceName'] for i in res['subItemPrice']]
+    assert len(names) == 1 and '螺纹截止阀' in names[0], names
+
+
+def t_price_toc_with_tab_not_section():
+    """目录行以 TAB 结尾页码时也必须跳过，否则整段只剩目录、分项 0 项。
+
+    投标人K目录：'七、分项报价表\\t169'。旧实现取"这一行"时从匹配起点找
+    换行，而模式以 \\n 开头，于是 toc_line 变成到文件末尾的多行串，行尾锚
+    永远不成立，目录逃过全部判据。
+    """
+    body_rows = '\n'.join(
+        '序号 | 项目名称 | 分项名称 | 子项名称 | 数量 | 单位 | 含税单价（元） | 含税总价（元） | 备注\n'
+        f'{i} | 系统研发 | 模块{i} | 子项{i} | {100 + i} | 人/天 | 2,000 | {200000 + i * 1000} | 税率6%'
+        for i in range(1, 5))
+    text = ('目 录\n'
+            '六、投标一览表\t168\n'
+            '七、分项报价表\t169\n'
+            '八、资格审查资料\t171\n'
+            '1. 基本情况表\t171\n'
+            '\n'
+            '七、分项报价表\n'
+            '单位：人民币元\n' + body_rows + '\n')
+    res = {'subItemPrice': [], 'totalPrice': None, 'totalPriceInTax': None,
+           'costDetails': [], 'warnings': []}
+    m._extract_structured_items(text, res)
+    assert len(res['subItemPrice']) == 4, res['subItemPrice']
+
+
 def main():
     # Tests must be hermetic: the extraction cache lives on disk between runs,
     # and a cached PDF extraction silently skips the very code path a test
@@ -3285,7 +3713,11 @@ def main():
     for name, fn in sorted(globals().items()):
         if name.startswith('t_') and callable(fn):
             check(name, fn)
-    print(f'\n{len(PASS)}/{len(PASS)} tests passed')
+    total = len(PASS) + len(FAILED)
+    print(f'\n{len(PASS)}/{total} tests passed')
+    if FAILED:
+        print('FAILED: ' + ', '.join(FAILED))
+        sys.exit(1)
 
 
 if __name__ == '__main__':

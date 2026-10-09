@@ -3690,12 +3690,41 @@ def _cn_to_number(text):
     return total + frac_val
 
 
+def _collapse_digit_spaces(s):
+    """Collapse space-separated digit runs inside a single line.
+
+    PDF text layers of bid letters frequently render an amount with a space
+    between EVERY digit ('（¥ 3 8 7 1 1）') — the 大写 form beside it
+    ('叁万捌仟柒佰壹拾壹元整') is what carries the meaning, but the Arabic
+    slot is where the value is read from. Measured on the 2026-10 仪表管阀件
+    corpus: 投标人H's 投标函 prints '¥ 3 8 7 1 1' and its total was lost entirely.
+
+    Two shapes are joined, both restricted to one line (never across '\\n', so
+    two table rows can never merge):
+
+    * ``SINGLE`` — a run of single digits each separated by one space
+      ('3 8 7 1 1' → '38711'). Cell-column numbers are printed as multi-digit
+      groups ('1838529 5002800'), which this rule cannot touch.
+    * ``THOUSANDS`` — thin-space thousands groups ('1 261 819.76').
+
+    SINGLE runs first: it is anchored on the separators, so it matches the
+    whole run, whereas THOUSANDS would bind '1 261' and leave an ambiguous
+    remainder. THOUSANDS then still catches the pure-thousands form.
+    """
+    # lone digit + exactly one space, repeated ('3 8 7 1 1')
+    s = re.sub(r'(?<!\d)\d(?:[ \t](?!\d{2,}(?!\d))\d)+(?!\d)', lambda m: m.group(0).replace(' ', '').replace('\t', ''), s)
+    # thin-space thousands groups ('1 261 819.76')
+    s = re.sub(r'(?<=\d)[ \t](?=\d{3}(?:\.\d+)?(?!\d))', '', s)
+    return s
+
+
 def _parse_amount(s):
     """Parse a price string to float.
 
     Supports: '1,234,567.89', '123.45万元', '1.2亿元',
     pure Chinese uppercase '壹佰贰拾叁万' / '壹仟贰佰叁拾肆万伍仟陆佰柒拾捌元整',
-    and informal '一千二百三十四'. Falls back to the first Arabic numeral found.
+    informal '一千二百三十四', and space-separated digit runs
+    ('¥ 3 8 7 1 1' → 38711). Falls back to the first Arabic numeral found.
     """
     if not s:
         return 0.0
@@ -3711,10 +3740,7 @@ def _parse_amount(s):
     if re.search(r'\d', s) and re.fullmatch(r'[\dOoIl|.\s]+', s):
         s = s.translate(str.maketrans('OoIl|', '00111'))
 
-    # Thousands thin-space groups from PDF ('1 261 819.76'). A space is only
-    # joined when followed by exactly 3 digits (plus optional decimal tail),
-    # so two space-separated column numbers ('1838529 5002800') never merge.
-    s = re.sub(r'(?<=\d)[ \t](?=\d{3}(?:\.\d+)?(?!\d))', '', s)
+    s = _collapse_digit_spaces(s)
 
     has_cn = any(ch in _CN_NUM or ch in _CN_UNIT or ch in _CN_SECTION for ch in s)
 
@@ -3754,14 +3780,195 @@ def _parse_amount(s):
     m = re.search(r'([\d]+\.?\d*)', s)
     return float(m.group(1)) * wan if m else 0.0
 
-# ── Structured Price Extraction ─────────────────────────────────
+# ── 表格列语义（分项报价表）────────────────────────────────────
+# 报价表的列必须先按语义分类，再决定哪些数字是"投标人的价"。2026-10 仪表
+# 管阀件语料（5 份标书，招标人给出的统一报价格式）暴露了三类误读：
+#   ① 编码列（'012001910000061'）被当成含税总价（1.2e13）；
+#   ② 含税单价限价列（招标人给的最高限价）被当成投标单价——投标人G的报
+#      价表根本没有投标单价列，于是限价 55/60/70 成了"投标报价"；
+#   ③ 名称规格里的压力等级 'class900' 被当成数量/单价（900 出现 8 次）。
+# 判据全部来自表头文字：招标人自己把列命名为"含税单价限价"还是"投标单价"
+# 是唯一可靠依据，靠数值大小/位置猜都会错。
+_COL_ROLE_PATTERNS = (
+    # 编码/物料号列：值 ≥13 位数字，绝不是金额
+    ('code', r'编\s*[码号]|物料\s*[码号]|货物\s*[码号]|商品\s*[码号]|物\s*资\s*编|'
+             r'产品\s*[码号]|型\s*号\s*编|项\s*目\s*编\s*[码号]'),
+    ('seq', r'序\s*号|^序$|^#'),
+    # 备注/说明类列：其中的数字（页码、期限）不是价格
+    ('other', r'备\s*注|说\s*明|交\s*货\s*期|交\s*货\s*日\s*期|质\s*保\s*期|'
+              r'生\s*产\s*周\s*期|计\s*划\s*交\s*货|品\s*牌|厂\s*家|制\s*造\s*商|'
+              r'供\s*货\s*期|到\s*货\s*期'),
+    # 非投标价（限价/控制价/保证金/合同价…）：列内数字不是本标报价
+    ('nonbid', r'限\s*价|最高\s*限|控\s*制\s*价|拦\s*标\s*价|预\s*算|暂\s*估|'
+               r'保\s*证\s*金|押\s*金|保\s*函|合\s*同\s*[价金]|历\s*史\s*[价金]|'
+               r'上\s*期\s*[价金]|参\s*考\s*价|市\s*场\s*价|基\s*准\s*价|'
+               r'中\s*标\s*[价金]|成\s*交\s*[价金]'),
+    # 投标价（本标报价）：优先于上面的通用 price
+    ('bidprice', r'投\s*标\s*单\s*价|投\s*标\s*价|报\s*价\s*单\s*价|响\s*应\s*单\s*价|'
+                 r'综\s*合\s*单\s*价|本\s*次\s*报\s*价|磋\s*商\s*报\s*价|'
+                 r'最\s*终\s*报\s*价|中\s*标\s*单\s*价'),
+    # 税
+    ('tax', r'税\s*率|税\s*额|税\s*金|增值税'),
+    # 数量
+    ('count', r'数\s*量|采\s*购\s*数\s*量|订\s*货\s*数\s*量|工\s*程\s*量'),
+    # 名称
+    ('name', r'名\s*称\s*规\s*格|名\s*称|名\s*目|分\s*项|产\s*品|服\s*务|'
+             r'项\s*目\s*名\s*称|标\s*的\s*名\s*称|货\s*物\s*名\s*称|内\s*容'),
+    # 单位
+    ('unit', r'计\s*量\s*单\s*位|单\s*位'),
+    # 单价 / 总价：分开命名才能按列取——服务类标书是
+    # '… | 数量 | 单位 | 含税单价（元） | 含税总价（元） | 备注'，
+    # 按数值大小猜会把行总价 618000 当单价。
+    ('totalprice', r'总\s*价|合\s*计\s*[金价]|金\s*额|小\s*计'),
+    ('unitprice', r'单\s*价|费\s*率|单\s*位\s*价'),
+    # 通用价格（兜底：报价/价格/含税/不含税）
+    ('price', r'报\s*价|价\s*格|[含不]\s*税|元\s*[）)]|'
+              r'（\s*元|\(\s*元|人\s*民\s*币'),
+)
+
+# 任何一个都说明该列承载的是"钱"（行价）。'nonbid' 故意不在其中：限价/控制价
+# 列的钱不是本标报价。frozenset —— 与表头角色集合做交集运算。
+_PRICE_ROLES = frozenset(('bidprice', 'price', 'unitprice', 'totalprice'))
+
+# 规格/型号/压力等级里的数字不是数量也不是钱。压力等级的写法是数量级
+# 隐患最大的一个：'class900 316ss' 的 900 与真实单价同量级。
+_SPEC_NUM_CTX = re.compile(
+    r'class|等级|级别|压力|口径|公称|材质|材料|标准|规格|型号|牌号|'
+    r'IP\d|dB|MHz|GHz|mm|cm|kg|像素|英寸|℃|℉|'
+    r'\d+\s*[〞″"]|\d+\s*[×xX*]\s*\d+|316|304|A350|A105|A216|A182')
+
+
+def _infer_column_roles(header_cells):
+    """Map column index -> semantic role string ('' when unknown).
+
+    First matching pattern wins per column, which is what puts '含税单价限价'
+    into nonbid rather than price and '投标单价（含13%税）' into bidprice.
+    """
+    roles = []
+    for h in header_cells:
+        h = re.sub(r'\s+', '', h or '')
+        role = ''
+        for candidate, pat in _COL_ROLE_PATTERNS:
+            if re.search(pat, h):
+                role = candidate
+                break
+        roles.append(role)
+    return roles
+
+
+def _looks_like_code_cell(cell):
+    """True for 物料编码-shaped cells: long digit runs, never money.
+
+    Guards the case where the header merge failed to mark a 编码 column.
+    """
+    c = re.sub(r'[\s,]', '', cell or '')
+    if not c:
+        return False
+    if re.fullmatch(r'\d{12,}', c):
+        return True
+    if re.match(r'^(?:编\s*码|物料\s*码|货物\s*码|商品\s*码|物资\s*编)', c):
+        return True
+    return False
+
+
+# 手机号(11) / 身份证(18) / 银行账号(16-19) / 统一社会信用代码(18) —— 都是连续
+# ≥11 位数字，量级上完全不像单价或总价，但会污染"分项合计"。
+_IDENTIFIER_DIGITS = re.compile(r'(?<!\d)\d{11,}(?!\d)')
+
+
+def _looks_like_identifier_cell(cell):
+    """True when the cell is (or contains) a phone / ID / account number.
+
+    A 联系方式 sub-table dragged into the price section contributes
+    `联系人 | 张三 | 电话 | 13900000009`; the number then lands in the
+    price pool as a ~1.4e10 sub-item total (measured on the 2026-10
+    service corpus).
+    """
+    c = re.sub(r'[\s,，\-]', '', cell or '')
+    return bool(_IDENTIFIER_DIGITS.search(c))
+
+
+def _numeric_token_roles(text):
+    """Yield (value, leading, trailing, after, start, kind) per number in a cell.
+
+    kind ∈ {'code','count','price'}:
+      * a long digit run inside an alphanumeric token is a 编码 (never money);
+      * a bare integer below 1000 is a count candidate — a length/quantity;
+      * anything else is a price candidate.
+
+    'class900' stays a single alphanumeric token, so its digits are offered as
+    a count candidate only; the header role of the column then decides whether
+    the cell may contribute prices at all. That is why the 压力等级 can no
+    longer masquerade as a unit price.
+
+    ``after`` is the raw text straight after the digits (not truncated at the
+    token boundary), which is what the '6 万吨' quantity check needs.
+    """
+    for m in re.finditer(r'[\d][\d,.]*', text):
+        core = m.group(0)
+        digits = core.replace(',', '')
+        if not digits or not re.match(r'^\d', digits):
+            continue
+        ls = m.start()
+        while ls > 0 and (text[ls - 1].isalnum() or text[ls - 1] == '_'):
+            ls -= 1
+        rs = m.end()
+        while rs < len(text) and (text[rs].isalnum() or text[rs] == '_'):
+            rs += 1
+        lead, trail = text[ls:m.start()], text[m.end():rs]
+        numeric_only = bool(re.fullmatch(r'[\d.]*', lead)) and bool(re.fullmatch(r'[\d.]*', trail))
+        after = text[m.end():m.end() + 4]
+        if numeric_only and re.fullmatch(r'\d{12,}', digits):
+            yield (float(digits), lead, trail, after, m.start(), 'code')
+            continue
+        try:
+            val = float(digits)
+        except ValueError:
+            continue
+        if not numeric_only:
+            # letter-adjacent digits (class900 / 316ss / IP65 / DN50)
+            yield (val, lead, trail, after, m.start(), 'count')
+        elif val == int(val) and 1 <= val <= 999:
+            yield (val, lead, trail, after, m.start(), 'count')
+        else:
+            yield (val, lead, trail, after, m.start(), 'price')
+
+
+# 数量单位：'6 万吨' 的 6 是数量不是 60000 元。价格通道与成本通道共用。
+_QTY_AFTER_RE = re.compile(r'^\s*(?:吨|年|人|台|套|件|份|个|只|支|张|条|组|批|车|箱|袋|'
+                           r'平(?:方)?|立(?:方)?|千|米|公(?:里|斤)|亩|户|次|名|页|'
+                           r'天|月|周|小时|分钟|秒|公斤|克|吨位|万台|人次)')
+
+# 合计/汇总行：不是分项。整行正则（名字列被合并单元格填成 '合计报价'，
+# `line.startswith('合计')` 抓不到 '19 | 合计报价 | …'）。
+# 只认"合计类词独占名称列"的形态，避免把 '合计金额核对服务' 这类真实分项误杀。
+_SUMMARY_ROW_RE = re.compile(
+    r'^(?:\d{1,3}\s*\|\s*)?(?:合计|总计|小计|总价|总额|报价合计|合计报价|'
+    r'合\s*计\s*报\s*价)\s*(?:\||$)')
+
+
+def _is_price_summary_row(line):
+    """True for the 合计报价 / 总计 row of a 分项报价表."""
+    return bool(_SUMMARY_ROW_RE.match(line.strip()))
+
 # Arabic amount with optional 万元/亿/元 suffix captured into the group, so
 # '12.5万元' / '126181976.30元' keep their magnitude through _parse_amount.
 # (A bare [\d,]+\.?\d* alternation would stop before the unit and lose x10000.)
 # '(?: \d{3})*' tolerates thin-space thousands groups ('1 261 819.76') that
 # PDF extraction emits instead of commas — the group shape (exactly 3 digits
 # after each space) keeps two space-separated column numbers apart.
-_AMT_ARABIC = r'[\d,]+(?: \d{3})*\.?\d*\s*(?:万|亿)?\s*元?'
+# ── 空格逐位金额（'¥ 3 8 7 1 1'）──
+# 部分投标函 PDF 的文本层把金额每一位都用空格隔开。两条形态各自要求邻位
+# 形状，因此永远不会咬进相邻表格列（'1838529 5002800' 保持两个数）：
+#   _AMT_SPACED_1：单个数字 + 空格 重复（'3 8 7 1 1'）
+#   _AMT_SPACED_3：数字 + 恰好 3 位一组（'1 261 819.76'）
+_AMT_SPACED_1 = r'\d(?:[ \t](?!\d{2,}(?!\d))\d)+(?!\d)'
+_AMT_SPACED_3 = r'\d+(?:[ \t]\d{3})+(?:\.\d+)?(?!\d)'
+_AMT_SPACED = r'(?:' + _AMT_SPACED_1 + r'|' + _AMT_SPACED_3 + r')'
+# SPACED leads: it anchors on its own separators and so matches the longest
+# unambiguous run first; then the comma/plain forms, then the thousands form.
+_AMT_ARABIC = (r'(?:' + _AMT_SPACED + r'|[\d,]+\.\d+|[\d,]+)'
+               r'\s*(?:万|亿)?\s*元?')
 # Full Chinese uppercase / informal numeral string (incl. 元/角/分/整).
 _AMT_CN = r'[壹贰叁肆伍陆柒捌玖拾佰仟万亿零一二三四五六七八九十百千元整角分圆]+'
 _AMT = r'(?:' + _AMT_ARABIC + r'|' + _AMT_CN + r')'
@@ -3777,18 +3984,20 @@ _AMT_FLEX = r'(?:' + _AMT_ARABIC + r'|' + _AMT_CN_FLEX + r')'
 # ── 第三批扩充：标签→值的分隔形态 ──
 # 表单填空下划线（'投标总价：____98.6万元____'）、冒号可有可无的空格分隔
 # （'投标总价 980000元'）、标签后的括号注记（'投标总价（含税）：…'）。
-_LBL_FILL = r'[_＿：:=\s]+'     # ≥1 个分隔字符：冒号/等号/下划线/空白任意组合
-_FILL_OPT = r'[_＿\s]*'          # 纯填充（可零长），用于冒号已单独匹配处
+_LBL_FILL = r'[_＿【】\[\]：:=\s]+'     # ≥1 个分隔字符：冒号/等号/下划线/填空括号/空白任意组合
+_FILL_OPT = r'[_＿【】\[\]\s]*'          # 纯填充（可零长），用于冒号已单独匹配处
 # Specific bid-total labels may also connect with 为/是 ('投标总价为98万元' /
 # '总报价是350万') — kept to the specific-label tier only; the generic
 # 总价/合计 tier stays colon/whitespace-only.
 _BID_SEP = r'(?:[_＿：:=\s]+|为|是)'
 # Cell-shaped number for flattened table rows: thousands commas, thin-space
-# groups, optional 1-2 decimals, optional directly-attached 万元/元 suffix.
+# groups (incl. the per-digit form '3 8 7 1 1'), optional 1-2 decimals,
+# optional directly-attached 万元/元 suffix.
 # (?!\d) ends the number at a real boundary so a thin-space group can never
 # bite into the NEXT column number ('1838529 5002800' must stay two numbers);
 # no trailing whitespace tolerance (see Channel 5 note on magnitude blow-up).
-_AMT_CELL = r'[\d,]+(?: \d{3})*\.?\d{0,2}(?!\d)(?:万元?|元)?'
+_AMT_CELL = (r'(?:' + _AMT_SPACED + r'|[\d,]+\.?\d{0,2})'
+             r'(?!\d)(?:万元?|元)?')
 # Contexts that are amounts but NOT the bidder's own price. Shared by the
 # price channels and post-validation so an amount is judged consistently:
 # bid bonds / deposits, reference contract amounts, document prices, capital,
@@ -4693,11 +4902,15 @@ def _extract_structured_items(text, result):
     ]
 
     bid_section = None
-    # Build alternation pattern from keywords
+    # Build alternation pattern from keywords.
+    # 关键词必须是"整词"：'设备清单装入各部分的包装箱中。' 里的『设备清单』只是
+    # 技术条款句子的一部分，`[^\n]*` 会让它整体命中并把该段当成分项报价章节
+    # （投标人F 1057 页的实际选段）。紧随其后的汉字即否决；标点/空白/结尾
+    # 才允许（'分项报价表（二）'、'开标一览表：'、'报价明细表 ' 都还在）。
     kw_pattern = '|'.join(re.escape(kw) for kw in section_keywords)
     for m in re.finditer(
         r'(?:^|\n)(?:[一二三四五六七八九十\d]+[、.。]\s*|\d+(?:\.\d+)+\s*|\d+\s+)?(' +
-        kw_pattern + r')[^\n]*\n', text
+        kw_pattern + r')(?![一-鿿])[^\n]*\n', text
     ):
         pos = m.start()
         # Skip TOC entries: dotted leaders OR trailing page numbers /
@@ -4705,7 +4918,16 @@ def _extract_structured_items(text, result):
         # uses page numbers without dots, and the section finder used to
         # accept the TOC line as the 分项报价表 heading itself).
         prefix = text[max(0, pos - 30):pos]
-        toc_line = text[pos:text.find('\n', pos) if text.find('\n', pos) > pos else pos + 80]
+        # 取"这一行"必须从 pos 之后开始找换行：匹配本身以 \n 开头（模式是
+        # `(?:^|\n)…`），从 pos 找 '\n' 会立刻命中那个前导换行，于是 toc_line
+        # 变成"从头到文件末尾的多行串"，行尾锚 `$` 永远不成立——目录行因此
+        # 逃过所有目录判据（投标人K '七、分项报价表\t169' 被当成正文章节，
+        # 分项报价表 0 项）。
+        _ls = pos + 1 if text[pos:pos + 1] == '\n' else pos
+        _le = text.find('\n', _ls)
+        toc_line = text[_ls:_le if _le > _ls else _ls + 80].strip()
+        # 目录行：点线引导、'P177-192' 页码范围、行尾页码——页码前缀可能是
+        # 空格**或 TAB**（投标人K目录用 TAB）。
         if re.search(r'\.{3,}', prefix) or re.search(r'P\d+\s*[-–—~]\s*\d+', toc_line) \
                 or re.search(r'[\t ]\d{1,4}\s*$', toc_line):
             continue
@@ -4725,7 +4947,15 @@ def _extract_structured_items(text, result):
                     next_pos = sm.start()
                     break
         bid_section = text[pos:next_pos]
-        break
+        # 选段必须真的带报价信号：技术条款里的一句话命中关键词是常见形态
+        # （'设备清单装入各部分的包装箱中。'），那段里的规格表会被当成分项
+        # 报价表。价格列标题/单价关键词/元字号三项任一即可。
+        if not re.search(r'单价|总价|报价|金额|价格|含税|不含税|税率|元\s*[/／）)]|'
+                         r'[￥¥]|\d+\.\d{2}\s*(?:元)?|'
+                         r'(?<!\d)\d{5,}(?!\d)', bid_section):
+            bid_section = None
+        if bid_section:
+            break
 
     if bid_section:
         # Detect docx pipe-separated tables (vs PDF space-separated)
@@ -4751,6 +4981,29 @@ def _extract_structured_items(text, result):
             return None
         return n.strip()
 
+    # 成本明细的名称黑名单：业绩/资格/技术章节的散文行会被 Pattern C 的
+    # 名称类词尾（材料/设备/服务/采购…）捕到。实测投标人H的业绩表散文
+    # '某某聚酯新材料 6 \n万吨/年 PBST 连续聚合 EPC 总承包项目'
+    # 被读成"成本项 某某聚酯新材料 = 60000 元"（6 万吨 × 万倍率），
+    # 并进一步在报价对比里生成了假的"预计成本"行。合同/项目/业绩类词尾
+    # 一票否决，与 _filter_price_items 的口径一致。
+    # NOTE: 三个 Pattern 共用，必须在 Pattern A 之前定义。
+    _COST_NAME_STOP = re.compile(
+        r'合同|协议|订单|项目|标段|业绩|资格|证书|资质|声明|承诺|记录|报告|'
+        r'方案|简介|概况|一览|清单|制度|流程|规范|标准|要求|情况|内容|'
+        r'公司|集团|研究所|学院|大学|中心|银行|支行|地址|电话|传真|邮编|'
+        r'姓名|职务|岗位|职称|联系人')
+
+    def _cost_name_ok(name):
+        """Reject cost names that are really 业绩/资格/技术 prose fragments."""
+        if not name or _COST_NAME_STOP.search(name):
+            return False
+        # A real cost item names a cost: require one cost-class word.
+        if not re.search(r'费|成本|支出|投入|工资|薪酬|酬金|折旧|摊销|租金|'
+                         r'收益|利润|税金|公积金|基金|不可预见', name):
+            return False
+        return True
+
     # Pattern A: "本项目材料费为   340,000.00元" (defense industry descriptive format)
     desc_cost_pat = re.compile(
         r'本项目\s*([一-鿿]{2,20}(?:费|成本|支出|收益|利润))\s*为\s*([\d,]+\.?\d*)\s*元',
@@ -4761,6 +5014,9 @@ def _extract_structured_items(text, result):
         raw_name = m.group(1).strip()
         name = _norm_cost_name(raw_name)
         if not name or name in seen_names:
+            continue
+        if not _cost_name_ok(name):
+            seen_names.add(name)
             continue
         val = float(m.group(2).replace(',', ''))
         if val == 0:
@@ -4791,6 +5047,9 @@ def _extract_structured_items(text, result):
         raw_name = m.group(2).strip() if m.group(2) else m.group(1).strip()
         name = _norm_cost_name(raw_name)
         if not name or name in seen_names:
+            continue
+        if not _cost_name_ok(name):
+            seen_names.add(name)
             continue
         val = float(m.group(3).replace(',', ''))
         if val == 0:
@@ -4827,9 +5086,18 @@ def _extract_structured_items(text, result):
         name = _norm_cost_name(raw_name)
         if not name or name in seen_names:
             continue
+        if not _cost_name_ok(name):
+            seen_names.add(name)
+            continue
         digits = m.group(2)
         val = float(digits.replace(',', ''))
         if m.group(3):  # 万元 magnitude suffix — keep the real scale
+            # '6 万吨/年' — the 万 belongs to a QUANTITY unit, not to a price
+            # magnitude. Checked on the raw text right after the match, because
+            # the regex stops at '万' and the unit char follows it.
+            if _QTY_AFTER_RE.match(text[m.end():m.end() + 6]):
+                seen_names.add(name)
+                continue
             val *= 10000 if m.group(3).startswith('万') else 1
         elif len(digits.replace(',', '').replace('.', '')) < 4:
             # Bare numbers keep the old \d{4,} guard (skip small values/years)
@@ -5105,7 +5373,11 @@ def _validate_price_extraction(text, result, bid_section):
                 f'报价或分项可能提取不完整')
 
     # ── Provenance note: total came from full-text fallback ──
-    if result.get('_from_global') and result.get('totalPriceInTax') is not None:
+    # 警告文案说的是"未定位到报价章节"，所以只在**真的没定位到章节**时才给：
+    # 找到章节但金额是从投标函的「￥【54267】」取的，是正常路径而不是兜底
+    # （投标人G 54267 正确却被标记低置信度，属误报）。
+    if result.get('_from_global') and result.get('totalPriceInTax') is not None \
+            and not bid_section:
         result['warnings'].append('总价来自全文兜底匹配（未定位到报价章节），置信度较低，建议人工复核')
 
     # ── Filter suspicious cost details ──
@@ -5196,7 +5468,12 @@ def _parse_pdf_bid_table(section, result):
     pending_name = []
     _NUM_ONLY = re.compile(r'^[\d\s.,%％‰\\/万元元（）()-]+$')
     for s in raw_rows:
-        has_amounts = bool(re.search(r'(\d{4,}|[\d.]+\s*万)', s))
+        # 管道行（≥3 个 '|'）一定是表格数据行：分项单价常只有 2-3 位
+        # （'… | 个 | 855 | '），旧判据 \d{4,} 认不出它，于是这一行被当成
+        # 名称续行塞进上一行，'855' 也就永远进不了价格池。
+        # 单个 '|' 的行不算（散文里的斜杠列表），但这类行里若出现 4+ 位
+        # 数字或 x万，仍按数据行处理。
+        has_amounts = s.count('|') >= 3 or bool(re.search(r'(\d{4,}|[\d.]+\s*万)', s))
         if has_amounts:
             if pending_name:
                 merged_rows.append((''.join(pending_name), s))
@@ -5399,6 +5676,156 @@ def _extract_summary_total(section, result):
             return
 
 
+def _parse_flattened_bid_rows(lines, accepted_regions):
+    """Parse price rows that lost their '|' separators on a continuation page.
+
+    A 报价表 that spans pages often keeps the pipe grid on the first page and
+    degrades to plain text afterwards — the row content is still complete
+    ('19 012002510000219 卡套式截止阀（入口1/2〞OD,出口1/2〞OD） / 气体/蒸汽/LNG
+    class900 316ss 个 298.32'), it just has no cell boundaries. Measured on
+    投标人F (1057 pages): the pipe grid holds rows 1-18 and 46 further rows
+    (19-64) are only reachable this way.
+
+    Detection is anchored on the 编码: a data line carrying a 12-15 digit code
+    right after a small sequence number. Continuation lines (wrapped 名称规格,
+    or a line holding just '个 620.37') are appended until the next row starts.
+    Two row openings occur in practice, both handled below:
+
+    * ``19 012002510000219 <name>`` — 序号 + 编码 + name on one line;
+    * ``31`` then ``012002510000213 <name>`` — the code wrapped to the next line.
+
+    Only lines following an accepted pipe region are scanned.
+    """
+    # 分隔符必须是 `\s*` 而不是 `\s+`：编码后面直接换行是常见形态
+    # （'31 012002510000213' 行尾无空格），`\s+` 会整行不匹配，
+    # 于是该行退化成普通文本、被并进上一行（投标人F 31-45、52-57 行全丢）。
+    anchored = re.compile(r'^(\d{1,3})\s+(\d{12,15})(?:\s+(.*))?$', re.S)
+    seq_only = re.compile(r'^(\d{1,3})$')
+    code_lead = re.compile(r'^(\d{12,15})\s*(.*)$', re.S)
+    items = []
+    n = len(lines)
+
+    def flush(buf):
+        if not buf:
+            return
+        item = _flattened_row_to_item(buf)
+        if item:
+            items.append(item)
+
+    for region_text in accepted_regions:
+        region_lines = region_text.split('\n')
+        if not region_lines:
+            continue
+        head = region_lines[0].strip()
+        try:
+            start = next(i for i in range(n) if lines[i].strip() == head)
+        except StopIteration:
+            continue
+        start += len(region_lines)
+        buf = None            # row being accumulated: [seq, code, text]
+        pending_seq = None    # 序号 seen without its 编码 yet
+        consec_seq = 0        # bare numbers in a row = page numbering, not rows
+        for i in range(start, min(start + 600, n)):
+            raw = lines[i].strip()
+            if not raw:
+                continue
+            m = anchored.match(raw)
+            if m:
+                flush(buf)
+                buf = [m.group(1), m.group(2), m.group(3) or '']
+                pending_seq = None
+                consec_seq = 0
+                continue
+            m = code_lead.match(raw)
+            if m and pending_seq is not None:
+                # '<seq>\n<code> <name>' — finish the wrapped row opening
+                flush(buf)
+                buf = [pending_seq, m.group(1), m.group(2)]
+                pending_seq = None
+                consec_seq = 0
+                continue
+            if raw.startswith(('合计', '注', '注：', '=')) or \
+                    re.match(r'^(?:第[一二三四五六七八九十]+[章节]|[一二三四五六七八九十]+、)', raw):
+                # 合计行 / 注释 / 章节标题 => the price table is over
+                flush(buf)
+                buf = None
+                pending_seq = None
+                break
+            m = seq_only.match(raw)
+            if m:
+                if buf is not None:
+                    # a new row is opening (its code wrapped): close the old one
+                    flush(buf)
+                    buf = None
+                # 裸数字是"序号"还是"页码"看后面几行：只有真正的行首才紧跟着
+                # 编码（同一行或下一行）。不能只数连续裸数字——'31\n32\n012…'
+                # 是两行连续的折行行首（投标人F 31-57 行全丢在这里）。
+                has_code_ahead = False
+                for k in range(i + 1, min(i + 5, n)):
+                    nxt = lines[k].strip()
+                    if not nxt:
+                        continue
+                    if anchored.match(nxt) or code_lead.match(nxt):
+                        has_code_ahead = True
+                    break
+                if has_code_ahead:
+                    pending_seq = m.group(1)
+                    consec_seq = 0
+                else:
+                    pending_seq = None
+                    consec_seq += 1
+                    if consec_seq >= 2:
+                        # 连续裸数字且后面没有编码 => 页码，表格结束
+                        flush(buf)
+                        buf = None
+                        consec_seq = 0
+                        break
+                continue
+            consec_seq = 0
+            if buf is None:
+                if pending_seq is not None:
+                    # name followed the 序号 but no 编码: not a table row
+                    pending_seq = None
+                continue
+            buf[2] += ' ' + raw
+        flush(buf)
+    # 同一行可能同时在管道表与续页文本里出现（表格跨页时首行会被重复输出），
+    # 按 (名称, 单价) 去重。
+    deduped, seen = [], set()
+    for it in items:
+        key = (re.sub(r'\s+', '', it['priceName']), it['unitPrice'])
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(it)
+    return deduped
+
+
+def _flattened_row_to_item(buf):
+    """Turn one accumulated flattened row into a price item, or None."""
+    seq, code, text = buf
+    name = re.sub(r'\s+', ' ', text).strip()
+    m = re.search(r'^(.*?)\s*[个只支套件台张条组批]?\s*([\d,]+(?:\.\d+)?)\s*$', name)
+    if not m:
+        return None
+    item_name, raw_price = m.group(1).strip(), m.group(2)
+    # strip a trailing unit char that the name regex kept
+    item_name = re.sub(r'\s*[个只支套件台张条组批]$', '', item_name).strip()
+    try:
+        price = float(raw_price.replace(',', ''))
+    except ValueError:
+        return None
+    if not item_name or len(item_name) < 2 or price <= 0:
+        return None
+    return {
+        'priceName': item_name, 'unit': '项',
+        'count': int(seq) if seq.isdigit() else 1,
+        'tax': None,
+        'unitPrice': price, 'totalPrice': price, 'totalPriceInTax': price,
+        'extras': {}, 'details': [],
+    }
+
+
 def _scan_docx_tables_for_pricing(text, result):
     """Scan full text for pipe-separated tables and parse only the most pricing-relevant ones.
     Filters out personnel, project history, tech spec tables by scoring header keywords."""
@@ -5431,10 +5858,17 @@ def _scan_docx_tables_for_pricing(text, result):
 
     # Score each region for pricing relevance
     PRICE_COL_KW = ['单价', '总价', '税率', '金额', '价格', '报价', '不含税', '含税']
+    # 业绩/资格/技术章节的表同样带"价格（元）""供货数量""签订合同时间"列，评分
+    # 拦不住：投标人H的业绩一览表整表进了分项报价（'管阀件 一批 = 2575568'，
+    # 那是历史合同金额）。表头词一票否决，与 _filter_price_items 同口径。
     NON_PRICE_KW = ['出差事由', '合同金额', '项目名称', '职务', '岗位', '职称',
                     '联系人', '联系电话', '项目经理', '指标要求', '功能要求',
                     '注册资金', '注册资本', '邮政编码', '银行账号', '开户行',
-                    '信用代码', '成立日期', '经营范围', '资质等级', '营业执照']
+                    '信用代码', '成立日期', '经营范围', '资质等级', '营业执照',
+                    '买方名称', '卖方名称', '工程名称', '项目概况', '供货数量',
+                    '签订合同', '使用地点', '履约情况', '规格型号', '主要技术',
+                    '业绩', '用户名称', '甲方', '乙方', '合同价格', '合同名称',
+                    '开竣工', '验收', '项目所在地', '发包人', '承包人']
     scored = []
     for start, end in regions:
         region_text = '\n'.join(lines[start:end])
@@ -5454,19 +5888,83 @@ def _scan_docx_tables_for_pricing(text, result):
         score += min(large_count, 10)
         scored.append((score, region_text))
 
-    # Parse all qualifying regions (score >= 5), accumulating items from EACH table
+    # 分区候选：同分项报价表跨页时会有多段（每段自带表头），它们必须合并；
+    # 但业绩表/人员表这类"另一个表"必须排除。
+    # 判据：与最高分段的表头列语义集合重合（用 _infer_column_roles 归一，
+    # 免得 '计量\n单位' 与 '计量单位' 这种排版差异被判成两张表）。
+    _HDR_ANY_KW = (r'(?:序号|名称|分项|数量|单位|单价|总价|税率|型号|规格|厂家|'
+                   r'备注|产品|服务|编码)')
+
+    def _hdr_roles(region_text):
+        best = None
+        for line in region_text.split('\n'):
+            if '|' not in line:
+                continue
+            cells = [c.strip() for c in line.split('|')]
+            if not _looks_like_header_row(cells, _HDR_ANY_KW):
+                # 数据行也常命中『名称规格/计量单位/投标单价』（那一行是产品名），
+                # 只有真正的表头行才能决定列语义——否则『含税单价限价』表会被
+                # 认成投标价表并整体并入（投标人F 46 行限价混进分项报价）。
+                continue
+            hits = sum(1 for c in cells if re.search(_HDR_ANY_KW, c))
+            if hits >= 2 and (best is None or hits > best[0]):
+                best = (hits, frozenset(r for r in _infer_column_roles(cells) if r))
+        return best
+
+    scored = [s for s in scored if s[0] >= 5]
+
+    # 参考分区必须真的是**投标价**表：招标人公开的最高限价表（'含税单价限价'）
+    # 往往行数更多、长数字更多，评分反而更高（投标人F 4111 段 16 分 vs 报价表
+    # 795 段 13 分）。拿限价表当参考，跨页合并就会把限价行并进分项报价。
+    # 判据用列语义：有 bidprice 列（投标单价/投标价…）才是本标报价表；
+    # 只有 nonbid（限价/控制价…）的是招标方限价表，不作为参考，也不参与解析。
+    _role_cache = {}
+
+    def _roles_of(region_text, key):
+        if key not in _role_cache:
+            _role_cache[key] = _hdr_roles(region_text)
+        return _role_cache[key]
+
+    _ref = None
+    for _sc, _rt in sorted(scored, key=lambda x: -x[0]):
+        _r = _roles_of(_rt, id(_rt))
+        if _r and 'bidprice' in _r[1]:
+            _ref = _r[1]
+            break
+    best_roles = _ref if _ref else (
+        _roles_of(scored[0][1], id(scored[0][1]))[1]
+        if scored and _roles_of(scored[0][1], id(scored[0][1])) else None)
+
     all_sub_items = []
+    accepted_regions = []
     for score, region_text in sorted(scored, key=lambda x: -x[0]):
-        if score >= 5:
-            temp_result = {'subItemPrice': [], 'totalPrice': None, 'totalPriceInTax': None}
-            _parse_docx_bid_table(region_text, temp_result)
-            if temp_result.get('subItemPrice'):
-                all_sub_items.extend(temp_result['subItemPrice'])
-            # Capture totals from the first region that has BOTH values
-            if (temp_result.get('totalPrice') and temp_result.get('totalPriceInTax')
-                    and not result.get('totalPrice')):
-                result['totalPrice'] = temp_result['totalPrice']
-                result['totalPriceInTax'] = temp_result['totalPriceInTax']
+        sig = _roles_of(region_text, id(region_text))
+        cur = sig[1] if sig else frozenset()
+        # 限价表本身不解析（它的数字不是投标价）
+        if cur and 'nonbid' in cur and 'bidprice' not in cur:
+            continue
+        if best_roles and cur:
+            overlap = len(best_roles & cur) / max(1, min(len(best_roles), len(cur)))
+            # 表头列语义重合度低 => 这是另一张表，不是分项报价表的续页
+            if overlap < 0.6 or not (best_roles & _PRICE_ROLES):
+                continue
+        accepted_regions.append(region_text)
+        temp_result = {'subItemPrice': [], 'totalPrice': None, 'totalPriceInTax': None}
+        _parse_docx_bid_table(region_text, temp_result)
+        if temp_result.get('subItemPrice'):
+            all_sub_items.extend(temp_result['subItemPrice'])
+        # Capture totals from the first region that has BOTH values
+        if (temp_result.get('totalPrice') and temp_result.get('totalPriceInTax')
+                and not result.get('totalPrice')):
+            result['totalPrice'] = temp_result['totalPrice']
+            result['totalPriceInTax'] = temp_result['totalPriceInTax']
+
+    # 表格跨页后文本层可能不再输出 '|'，续页的分项行退化成纯文本
+    # （'19 012002510000219 卡套式截止阀… 个 298.32'）。这类行只在紧跟在
+    # 命中的管道表之后时补扫，且必须自带 12+ 位编码，避免把章节正文里的
+    # 数字当成分项。实测投标人F：管道段 18 行 + 纯文本续页 46 行 = 全表
+    # 64 行，投标单价列逐行对上。
+    all_sub_items.extend(_parse_flattened_bid_rows(lines, accepted_regions))
 
     if all_sub_items:
         result['subItemPrice'] = all_sub_items
@@ -5486,6 +5984,18 @@ def _parse_docx_bid_table(section, result):
         parts = [p.strip() for p in line.split('|')]
         hits = sum(1 for p in parts if re.search(HEADER_KW, p))
         if hits >= 2:
+            # 表头必须有"行价"列才算报价表：分项报价表的每一行都有单价/总价/
+            # 金额/报价列。技术规格表（供货数量/使用地点/签订合同时间）和技术
+            # 条款段里的表都没有，据此把非报价表整表挡在外面。
+            roles = _infer_column_roles(parts)
+            if not any(r in _PRICE_ROLES for r in roles) and \
+                    not any(re.search(PRICE_KW, p) for p in parts):
+                continue
+            # 候选行本身必须是表头而不是数据行：数据行的名称规格里常含
+            # 『分项/名称/单位/单价』字样，价格列还有真价格，命中数与表头相同
+            # （投标人F row 802 hits=5）。行内出现独立数字即判数据行。
+            if not _looks_like_header_row(parts, HEADER_KW):
+                continue
             price_score = sum(1 for p in parts if re.search(PRICE_KW, p))
             candidates.append((price_score, hits, i))
 
@@ -5508,9 +6018,41 @@ def _parse_docx_bid_table(section, result):
     _extract_summary_total(section, result)
 
 
+def _looks_like_header_row(cells, header_only_kw):
+    """True when every non-empty cell is header text — i.e. a header line.
+
+    Continuation headers must pass this: a DATA row that happens to carry
+    header-ish words in its name spec ('卡套式终端接头…名称规格…') and a price
+    in its value column ('150.29 投标单价…') previously satisfied the plain
+    keyword test and got merged into the header, shifting every column role by
+    one. Measured on 投标人F: the merge swallowed the 序号/编码/名称规格 subset
+    of a data row, so only 8 of 18 rows in the region could be parsed.
+
+    Rule: no cell may contain a free-standing number. Header cells carry at
+    most a parenthetical rate ('含13%税') or a unit hint, both of which sit
+    inside CJK/parentheses and are excluded by the lookarounds here.
+    """
+    non_empty = [c for c in cells if c.strip()]
+    if not non_empty:
+        return False
+    if not any(re.search(header_only_kw, c) for c in non_empty):
+        return False
+    for c in non_empty:
+        # a standalone number (not glued to letters/CJK on either side) in a
+        # header cell means this is really a data row
+        if re.search(r'(?<![\w\u4e00-\u9fff])[\d][\d,.]*(?![\w\u4e00-\u9fff])'
+                     r'|[\d,.]{4,}', c):
+            return False
+    return True
+
+
 def _parse_docx_rows(lines, hdr_idx, HEADER_KW):
     """Parse rows from a docx pipe table starting at hdr_idx. Returns item list."""
     items = []
+
+    # 表头续行只允许"整行都是表头文字"：数据行里的名称规格/投标单价字样不能把
+    # 它拉进表头，否则列语义整体错位（见 _looks_like_header_row）。
+    HEADER_ONLY_KW = r'(?:序号|名称|分项|数量|单位|单价|总价|税率|型号|规格|厂家|备注|产品|服务|编码)'
 
     # Merge forward header continuations
     hdr_end = hdr_idx
@@ -5518,7 +6060,7 @@ def _parse_docx_rows(lines, hdr_idx, HEADER_KW):
         nxt = lines[j].strip()
         if not nxt or '|' not in nxt: continue
         nxt_p = [p.strip() for p in nxt.split('|')]
-        if sum(1 for p in nxt_p if re.search(HEADER_KW, p)) >= 1 and not any(re.search(r'\d{4,}', p) for p in nxt_p):
+        if _looks_like_header_row(nxt_p, HEADER_ONLY_KW):
             hdr_end = j
         else: break
 
@@ -5528,7 +6070,7 @@ def _parse_docx_rows(lines, hdr_idx, HEADER_KW):
         prev = lines[j].strip()
         if not prev or '|' not in prev: continue
         prev_p = [p.strip() for p in prev.split('|')]
-        if sum(1 for p in prev_p if re.search(HEADER_KW, p)) >= 1 and not any(re.search(r'\d{4,}', p) for p in prev_p):
+        if _looks_like_header_row(prev_p, HEADER_ONLY_KW):
             hdr_start = j
         else: break
 
@@ -5537,13 +6079,37 @@ def _parse_docx_rows(lines, hdr_idx, HEADER_KW):
     merged_parts = [p.strip() for p in merged.split('|')]
     name_col = 1
     for ci, h in enumerate(merged_parts):
-        if re.search(r'(?:分项\s*)?名\s*称|分项|产品|服务|项目|内容|元器件', h):
+        if re.search(r'名\s*称\s*规\s*格|(?:分项\s*)?名\s*称|名\s*目|分\s*项|产品|服务|'
+                     r'项\s*目\s*名\s*称|内容|元器件', h):
             name_col = ci; break
+
+    # ── 列语义（见 _infer_column_roles）──
+    # 表头可能被 PDF 提取成多行（'含税单价\n限价(元）'），merged 已按 | 合并
+    # 了前后各 3 行表头，故列索引与数据行一致。
+    col_roles = _infer_column_roles(merged_parts)
+    has_bid_col = 'bidprice' in col_roles
+    code_cols = {ci for ci, r in enumerate(col_roles) if r == 'code'}
+    other_cols = {ci for ci, r in enumerate(col_roles) if r in ('other', 'nonbid')}
+    count_cols = {ci for ci, r in enumerate(col_roles) if r == 'count'}
+    price_cols = {ci for ci, r in enumerate(col_roles)
+                  if r in _PRICE_ROLES}
+    # 限价列存在时，投标单价列才是报价；只有限价列＝该表没有投标价。
+    if has_bid_col:
+        bid_cols = {ci for ci, r in enumerate(col_roles) if r == 'bidprice'}
+    else:
+        bid_cols = price_cols
+    # 数量列存在时数量只从数量列取（'含税单价限价 55' 曾被当成数量 55）。
+    count_source_cols = count_cols if count_cols else None
+    # 序号列：没有数量列时用它当 count（行标识，比编一个数字诚实）。
+    seq_col = next((ci for ci, r in enumerate(col_roles) if r == 'seq'), None)
+    # 表头声明的价格列：行级结构校验用（见下方 decl_price_cols 检查）。
+    decl_price_cols = bid_cols | price_cols
 
     prev_name = None
     for i in range(hdr_end + 1, len(lines)):
         line = lines[i].strip()
         if not line or '|' not in line: continue
+        if _is_price_summary_row(line): continue
         if any(line.startswith(kw) for kw in ['合计', '总价', '小计', '总计', '注：']): continue
         if re.match(r'^[三四五六七八九十]、', line): break
 
@@ -5584,77 +6150,186 @@ def _parse_docx_rows(lines, hdr_idx, HEADER_KW):
         elif name and len(name) >= 2: prev_name = name
         if len(name) < 2: continue
 
-        # Value extraction with context-aware classification
-        # Detect spec/non-price patterns in cells (resolution, IP ratings, model numbers)
-        _SPEC_PAT = re.compile(r'(?:分辨率|IP\d|dB|MHz|GHz|mm|cm|kg|g\b|V\b|A\b|W\b|'
-                               r'像素|英寸|寸|比特|波特|bps|kbps|℃|℉|'
-                               r'规格|型号|品牌|厂家|制造商)')
+        # ── 单元格数字分类 ──
+        # 每个数字按其所在 token 的形状先定 kind（见 _numeric_token_roles），
+        # 再按所在列的语义决定它能不能成为价格：编码列/限价列/备注列的
+        # 数字一律不进价格池。两处判据缺一不可 —— 只按形状分，'1200' 无法
+        # 与真正的单价区分；只按列分，'class900' 还会混进数量。
         all_nums = []
         for pi, p in enumerate(parts):
+            if pi == name_col or pi in code_cols or _looks_like_code_cell(p):
+                continue
+            if _looks_like_identifier_cell(p):
+                # 手机号 / 身份证 / 银行账号 / 信用代码（连续 ≥11 位数字）不是金额：
+                # 联系方式表的『联系人 | 张三 | 电话 | 13900000009』会被并进
+                # 分项报价表，把 13900000009（1.39e10）当成分项总价。
+                continue
             pct = re.search(r'(\d{1,2})\s*[%％]', p)
-            if pct:
+            if pct and pi not in other_cols:
                 all_nums.append(('tax', float(pct.group(1)), pi))
                 continue
-            nm = re.search(r'([\d,]+\.?\d+)', p.replace(',','').replace('，',''))
-            if not nm:
+            if not re.search(r'\d', p):
                 continue
-            v = float(nm.group(1))
-            # Skip spec-related numbers (resolution, IP ratings, etc.) unless marked with 元
-            is_spec = bool(_SPEC_PAT.search(p))
             has_yuan = '元' in p
-            # 面积/人次/重量等物理量不是钱：采购需求表的 '1738平方米'、
-            # '约500人次' 曾作为分项价格累加（分项合计到百万亿）。
-            is_qty = bool(re.search(r'平方米|平米|㎡|m2|人次|人数|面积|'
-                                    r'万?份|万?kg|吨|公里|km', p)) and not has_yuan
-            is_pure_num = re.match(r'^\s*[\d,]+\.?\d*\s*(?:元)?\s*$', p) is not None
-
-            if (is_spec or is_qty) and not has_yuan:
-                # Spec/quantity numbers: classify as count if small, ignore otherwise
-                if v < 1000 and v == int(v):
+            for v, lead, trail, after, _pos, kind in _numeric_token_roles(p):
+                # '6 万吨' / '3 年' 是数量不是金额；数量单位跟在数字后面即数量
+                qty_ok = bool(_QTY_AFTER_RE.match(after))
+                if _SPEC_NUM_CTX.search(lead) or _SPEC_NUM_CTX.search(trail) or _SPEC_NUM_CTX.search(p):
+                    if v < 1000 and v == int(v):
+                        all_nums.append(('count', v, pi))
+                    continue
+                if kind == 'code':
+                    continue
+                if qty_ok and not has_yuan:
+                    if 1 <= v <= 99999 and v == int(v):
+                        all_nums.append(('count', v, pi))
+                    continue
+                # 列语义优先于数字形状：整数价格（'855' 元/个）按形状会被判成
+                # 数量，只有列语义知道它是投标单价。类别未知的列才退回形状判据。
+                if pi in bid_cols or pi in price_cols:
+                    if not _is_bare_year_value(v, trail, line):
+                        all_nums.append(('price', v, pi))
+                    continue
+                if pi in count_cols:
                     all_nums.append(('count', v, pi))
-                # else: ignore (false price from spec text)
-            elif (v >= 100 or has_yuan) \
-                    and not _is_bare_year_value(v, nm.group(1), line):
-                all_nums.append(('price', v, pi))
-            else:
-                all_nums.append(('count', v, pi))
+                    continue
+                if kind == 'count':
+                    all_nums.append(('count', v, pi))
+                    continue
+                # kind == 'price'
+                if pi in other_cols:
+                    continue
+                if not col_roles:
+                    if not _is_bare_year_value(v, trail, line):
+                        all_nums.append(('price', v, pi))
+                elif pi in bid_cols or pi in price_cols:
+                    all_nums.append(('price', v, pi))
 
-        if len(all_nums) < 2: continue
-        counts = [(v, pi) for t, v, pi in all_nums if t == 'count' and 1 <= v <= 999 and v == int(v)]
+        # 数量没有 999 上限：服务类标书按人天计，'系统设计及开发' 可以是 1320。
+        # 声明了数量列时更不该套形状启发式——那是列语义已经确定的数字。
+        _cc = count_source_cols
+        counts = [(v, pi) for t, v, pi in all_nums
+                  if t == 'count' and v >= 1 and v == int(v)
+                  and (pi in _cc if _cc else v <= 999)]
         taxes = [(v, pi) for t, v, pi in all_nums if t == 'tax']
-        prices = [(v, pi) for t, v, pi in all_nums if t == 'price' and v >= 100]
+        # 明确的投标单价列里的小数就是单价：卡套式终端接头 35.03 元/个 低于
+        # 通用 100 元门槛，曾被整行丢掉（投标人E 16 行只剩 9 行）。类别未知的
+        # 列仍保留 100 元门槛，避免把数量当价格。
+        prices = [(v, pi) for t, v, pi in all_nums
+                  if t == 'price' and (v >= 100 or pi in bid_cols or pi in price_cols)]
+        # 有投标价列（或通用价格列）时，价格只认那些列 —— 限价列/备注列/编码列
+        # 的数字一律不进价格池（'含税单价限价' 列整体被排除）。
+        if bid_cols or price_cols:
+            allowed = bid_cols | (price_cols if not bid_cols else set())
+            prices = [(v, pi) for v, pi in prices if pi in allowed]
+
+        # ── 数量 ──
+        # 数量只从"数量列"或"序号列"来，绝不从价格类列（含限价列）来：
+        # 招标人给的分项报价表没有数量列，而"含税单价限价"列的 480/580/620/650
+        # 都落在数量候选区间（1-999 裸整数），旧实现按"取 ≥10 的最大值"选数量，
+        # 于是 count 里装的是限价（投标人L 61 行里 55 行如此）。序号才是这一行真实
+        # 的行标识；连序号都没有时用 1，而不是编一个数字。
+        counts = [(v, pi) for v, pi in counts
+                  if pi not in bid_cols and pi not in price_cols and pi not in other_cols]
+        if count_source_cols is not None:
+            counts = [(v, pi) for v, pi in counts if pi in count_source_cols]
+        elif seq_col is not None:
+            # 无数量列：数量取序号列的值（同一行，位置固定），否则回退天真的首值
+            seq_vals = [(v, pi) for v, pi in counts if pi == seq_col]
+            counts = seq_vals if seq_vals else counts
+        if not prices and not counts:
+            continue
 
         # Prefer count from pure-number cells over seq numbers (1, 2, 3...)
         if counts:
-            pure_counts = [(v, pi) for v, pi in counts
-                          if re.match(r'^\s*[\d,]+\s*$', parts[pi].strip())]
-            if pure_counts:
-                counts = pure_counts
-            # Sort by position: prefer counts that appear AFTER the first column
-            counts.sort(key=lambda x: x[1])
-            # Heuristic: if there's a value >= 10 and a tiny value (1-9), prefer the larger
-            big = [(v, pi) for v, pi in counts if v >= 10]
-            if big:
-                counts = big
-            # Skip common tax-rate values masquerading as count (13, 6, 9, 3, 17)
-            counts = [(v, pi) for v, pi in counts if v not in (3, 6, 9, 13, 17)]
-        if len(prices) < 2: continue
+            if count_source_cols is not None:
+                # 真·数量列：直接用第一个值，不套 ≤999 的形状启发式——服务类
+                # 标书按"人天"计，数量可以是 1320（投标人J '系统设计及开发'），
+                # 按 ≤999 过滤会整行回退成 1。
+                counts = [c for c in counts if c[1] in count_source_cols]
+            if counts:
+                pure_counts = [(v, pi) for v, pi in counts
+                              if re.match(r'^\s*[\d,]+\s*$', parts[pi].strip())]
+                if pure_counts:
+                    counts = pure_counts
+                # Sort by position: prefer counts that appear AFTER the first column
+                counts.sort(key=lambda x: x[1])
+                # Heuristic: if there's a value >= 10 and a tiny value (1-9), prefer the larger
+                big = [(v, pi) for v, pi in counts if v >= 10]
+                if big:
+                    counts = big
+                # Skip common tax-rate values masquerading as count (13, 6, 9, 3, 17)
+                counts = [(v, pi) for v, pi in counts if v not in (3, 6, 9, 13, 17)]
+
+        # 报价行至少要有单价；只有单价列（无数量/总价）的表也要收进来，
+        # 否则'投标单价（含13%税）'单列表整表落空。
+        if not prices:
+            continue
+        # ── 行必须符合表头声明的列结构 ──
+        # 章节窗口常常越过报价表、把紧随其后的另一张表（资格审查资料／基本
+        # 情况表）也圈进来，而那张表的行名（联系人/姓名）里没有数字，于是
+        # "名称 + 数字"的自由解析就把邻表的电话/编号当成了它的价格
+        # （实测服务语料：'联系人' 被赋手机号，量级 ~1.4e10）。
+        # 表头声明了价格列，就只有哪些列里真的出现价格的行才算报价行。
+        if decl_price_cols and not any(pi in decl_price_cols for _v, pi in prices):
+            continue
 
         sp = sorted(prices, key=lambda x: x[0])
         n = len(sp)
+        # ── 单价 / 行总价 ──
+        # 表头把两列都命名了（'含税单价（元）' + '含税总价（元）'），就按**列**
+        # 取，不要按大小猜：服务类标书这一行是 '系统需求调研 | 200 | 人/日 |
+        # 3090 | 618,000.00'，按大小会把 618000 当单价、把"分项合计"算成
+        # 单价之和 24,290（真实合计 5,900,000）。
+        unit_idx = next((i for i, r in enumerate(col_roles)
+                         if r == 'unitprice'), None)
+        total_idx = next((i for i, r in enumerate(col_roles)
+                          if r == 'totalprice'), None)
+        unit_price = total_price = total_tax = None
+        if unit_idx is not None and total_idx is not None:
+            for v, pi in prices:
+                if pi == unit_idx and unit_price is None:
+                    unit_price = v
+                elif pi == total_idx:
+                    total_price = total_tax = v
+        elif total_idx is not None:
+            for v, pi in prices:
+                if pi == total_idx:
+                    total_price = total_tax = v
+        elif unit_idx is not None:
+            for v, pi in prices:
+                if pi == unit_idx:
+                    unit_price = v
+        if unit_price is None:
+            unit_price = sp[0][0]
+        if total_price is None:
+            # 没有声明行总价列：n==1 时单价即该行金额（绝不能让
+            # unitPrice > totalPrice，_filter_price_items 的 'up > tp*1.5'
+            # 守卫会把整行丢掉——投标人F 64 行只剩 1 行）；n>=2 时沿用
+            # 位置启发式（不含税/含税多列形态）。
+            if n == 1:
+                total_price = total_tax = unit_price
+            else:
+                # n>=4: [unit, total_ex, ..., total_in] -> 不含税=次大(sp[-2])
+                # n==3: [unit, total_ex, total_in]     -> 不含税=中间值(sp[1])
+                # n==2: [unit, total]                  -> 不含税=较小值(sp[0])
+                total_price = sp[-2][0] if n >= 4 else (sp[1][0] if n >= 3 else sp[0][0])
+                total_tax = sp[-1][0] if n >= 3 else sp[1][0]
+        if total_tax is None:
+            total_tax = total_price
         item = {
             'priceName': name, 'unit': '项',
             'count': int(counts[0][0]) if counts else 1,
             'tax': (str(int(taxes[0][0])) + '%') if taxes else None,
-            'unitPrice': sp[0][0],
-            # n>=4: [unit, total_ex, ..., total_in] -> 不含税=次大(sp[-2])
-            # n==3: [unit, total_ex, total_in]     -> 不含税=中间值(sp[1])
-            # n==2: [unit, total]                  -> 不含税=较小值(sp[0])
-            'totalPrice': sp[-2][0] if n >= 4 else (sp[1][0] if n >= 3 else sp[0][0]),
-            'totalPriceInTax': sp[-1][0] if n >= 3 else sp[1][0],
+            'unitPrice': unit_price,
+            'totalPrice': total_price,
+            'totalPriceInTax': total_tax,
             'extras': {}, 'details': []
         }
-        if item['totalPrice'] and item['totalPrice'] >= 100:
+        # 收行门槛：类别未知的列保留 100 元门槛；明确的投标单价/价格列则只要
+        # 有值就收（卡套式终端接头 35.03 元/个 是真实单价，曾被当成噪音丢掉）。
+        _rate_known = bool(bid_cols or price_cols)
+        if item['totalPrice'] and (item['totalPrice'] >= 100 or _rate_known):
             items.append(item)
     return items
 
@@ -5690,7 +6365,16 @@ def _filter_price_items(items):
         if BAD.search(name_t): continue
         if PAGE_RANGE_RE.match(name_t): continue
         if CRED_RE.search(name_t) or ADDR_RE.search(name_t): continue
-        if len(name_t) > 50 or (len(name_t) > 20 and CLAUSE_RE.search(name_t)): continue
+        # 分项名可以是长的规格串（'螺纹截止阀（一次阀）（入口1/2〞NPT(M/F),出口…）
+        # / 气体/蒸汽/LNG class900 316ss （M-M、F-F、M-F、F-M）'＝87 字，真实
+        # 报价表里整列都长这样）。旧判据「>20 字且含甲方/委托等词就丢」把投标人F
+        # 18 行砍到 8 行。真正的合同正文判据是**句子**：句号/分号/逗号连成句，
+        # 或同段出现 2 个以上条款词；规格串只有顿号、括号和斜杠。
+        if len(name_t) > 120: continue
+        if len(name_t) > 20:
+            _clause_hits = len(set(CLAUSE_RE.findall(name_t)))
+            _is_prose = bool(re.search(r'[。；;]', name_t)) or _clause_hits >= 2
+            if _is_prose: continue
         up = item.get('unitPrice') or 0
         tp = item.get('totalPrice') or 1
         # 银行账号/信用代码（15-19 位）不是金额
