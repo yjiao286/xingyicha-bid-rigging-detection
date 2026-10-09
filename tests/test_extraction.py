@@ -6,6 +6,7 @@ No pytest dependency; plain asserts with a tiny runner.
 """
 import os
 import re
+import time
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -2128,6 +2129,50 @@ def t_waitress_body_cap_matches_upload_policy():
             os.environ.pop(key, None)
         else:
             os.environ[key] = saved
+
+
+def t_waitress_channel_timeout_covers_analysis_budget():
+    # waitress 默认 channel_timeout=120s 会收割"不活跃"连接；分析期间的
+    # 长静默段（并行提取纯 docx/文字PDF 批次无 OCR 事件）必须被覆盖，
+    # 否则流在分析中途被服务器自己掐断。
+    from waitress.adjustments import Adjustments
+
+    assert m._waitress_channel_timeout == 3600 + 300
+    adj = Adjustments(channel_timeout=m._waitress_channel_timeout)
+    assert adj.channel_timeout > 120, '须高于 waitress 原生 120s 默认'
+
+
+def t_stream_heartbeat_during_silence():
+    # 静默段心跳：并行提取只转发 OCR 类事件，纯 docx/文字 PDF 批次可能
+    # 数分钟无事件下发——带内置网络超时的浏览器（及 EDR 的 HTTP 过滤）
+    # 会掐断这条"看似死亡"的连接（前端 network error，waitress 报
+    # Client disconnected）。心跳让连接始终有字节流动。
+    import queue as _queue
+
+    q = _queue.Queue()
+
+    # 透传：真事件原样通过
+    q.put({'type': 'progress', 'label': 'x'})
+    it = m._iter_stream_events(q, lambda: True, heartbeat_every=0.3)
+    assert next(it) == {'type': 'progress', 'label': 'x'}
+
+    # 静默：无事件时按 heartbeat_every 周期发心跳
+    t0 = time.monotonic()
+    hb = next(it)
+    assert hb == {'type': 'heartbeat'}, hb
+    assert time.monotonic() - t0 >= 0.25, '心跳不得早于 heartbeat_every'
+    it.close()
+
+    # 退出：worker 已死且队列排空 → StopIteration（排空尾部事件后）
+    q.put({'type': 'extract'})
+    out = list(m._iter_stream_events(q, lambda: False, heartbeat_every=60))
+    assert out == [{'type': 'extract'}], out
+
+    # should_stop：谓词为真立即结束（分析阶段的 cancelled/deadline 加急）
+    out = list(m._iter_stream_events(_queue.Queue(), lambda: True,
+                                     should_stop=lambda: True,
+                                     heartbeat_every=60))
+    assert out == [], out
 
 
 def main():

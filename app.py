@@ -33,7 +33,7 @@ import threading
 #   - 前端 footer 版本标注与静态资源缓存参数（?v=）由模板渲染注入；
 #   - 桌面版 Release 产物文件名后缀、Inno Setup 安装器版本由 CI 从此处
 #     读取（desktop-build.yml「Derive version from app.py」）。
-APP_VERSION = '2.2.2'
+APP_VERSION = '2.2.3'
 
 # ── Frozen (PyInstaller) detection ──────────────────────────────
 # When bundled as a desktop exe, templates/static live inside the bundle
@@ -85,6 +85,11 @@ if _max_body_mb:
 _waitress_max_body_bytes = (
     _max_body_mb * 2 * 1024 * 1024 if _max_body_mb else 32 * 1024 * 1024 * 1024
 )
+
+# waitress's channel_timeout (default 120s) reaps "inactive" connections and
+# would cut a mid-analysis stream during the same silent stretches the
+# heartbeat below guards against. Align it with the analysis budget.
+_waitress_channel_timeout = int(os.environ.get('ANALYSIS_TIMEOUT', '3600')) + 300
 
 
 @app.errorhandler(413)
@@ -7957,6 +7962,43 @@ def _write_history_entry(history_results, saved, saved_refs):
     return history_id
 
 
+def _iter_stream_events(progress_queue, is_alive, should_stop=None,
+                        heartbeat_every=10.0):
+    """Drain `progress_queue`, yielding a heartbeat dict once nothing real has
+    arrived for `heartbeat_every` seconds.
+
+    Long analyses have silent stretches where no event is produced for
+    minutes — parallel extraction only forwards OCR-phase events, so a batch
+    of plain docx/text-PDF bids streams nothing until each file finishes.
+    Browsers with built-in network timeouts (and endpoint-security HTTP
+    filters) then cut the seemingly-dead connection: the page reports
+    "network error"/"Failed to fetch" while waitress logs "Client
+    disconnected while serving". A periodic heartbeat keeps bytes flowing so
+    no idle-timeout ever fires. The frontend silently ignores event types it
+    doesn't handle. Ends when the worker is dead and the queue is empty, or
+    `should_stop()` returns True.
+    """
+    import queue as _queue
+    last_emit = time.monotonic()
+    while True:
+        try:
+            event = progress_queue.get(timeout=0.2)
+        except _queue.Empty:
+            event = None
+        if event is not None:
+            last_emit = time.monotonic()
+            yield event
+        else:
+            now = time.monotonic()
+            if now - last_emit >= heartbeat_every:
+                last_emit = now
+                yield {'type': 'heartbeat'}
+        if should_stop is not None and should_stop():
+            return
+        if not is_alive() and progress_queue.empty():
+            return
+
+
 @app.route('/api/analyze_stream', methods=['POST'])
 def analyze_stream():
     """Upload + analyze with streaming NDJSON progress events.
@@ -8166,14 +8208,12 @@ def analyze_stream():
         ext_thread.start()
 
         # Drain extraction progress events in real time — per-page PDF
-        # updates now reach the client while pages are being read instead
-        # of being buffered until extraction completes.
-        while ext_thread.is_alive() or not progress_queue.empty():
-            try:
-                event = progress_queue.get(timeout=0.2)
-                yield json.dumps(event, ensure_ascii=False) + '\n'
-            except queue.Empty:
-                pass
+        # updates now reach the client while pages are being read instead of
+        # being buffered until extraction completes. Heartbeats cover the
+        # silent stretches of parallel extraction (see _iter_stream_events).
+        for event in _iter_stream_events(progress_queue,
+                                         ext_thread.is_alive):
+            yield json.dumps(event, ensure_ascii=False) + '\n'
 
         ext_thread.join(timeout=5)
         if ext_thread.is_alive():
@@ -8234,16 +8274,12 @@ def analyze_stream():
         # minutes per file (763-page scanned bids measured ~10-30min).
         ANALYSIS_TIMEOUT = int(os.environ.get('ANALYSIS_TIMEOUT', 3600))
         deadline = time.monotonic() + ANALYSIS_TIMEOUT
-        while thread.is_alive() or not progress_queue.empty():
-            try:
-                event = progress_queue.get(timeout=0.1)
-                yield json.dumps(event, ensure_ascii=False) + '\n'
-            except queue.Empty:
-                pass
-            if cancelled_holder:
-                break
-            if thread.is_alive() and time.monotonic() > deadline:
-                break
+        for event in _iter_stream_events(
+                progress_queue, thread.is_alive,
+                should_stop=lambda: (
+                    bool(cancelled_holder)
+                    or (thread.is_alive() and time.monotonic() > deadline))):
+            yield json.dumps(event, ensure_ascii=False) + '\n'
 
         thread.join(timeout=5)
         if cancelled_holder:
@@ -8725,7 +8761,8 @@ def _run_macos_gui(url, host, port):
     def _serve():
         try:
             serve(app, host=host, port=port, threads=8,
-                  max_request_body_size=_waitress_max_body_bytes)
+                  max_request_body_size=_waitress_max_body_bytes,
+                  channel_timeout=_waitress_channel_timeout)
         except Exception as exc:
             print(f'  服务器线程异常退出: {exc}')
 
@@ -8825,6 +8862,7 @@ if __name__ == '__main__':
             from waitress import serve
             print('  服务器: waitress (threads=8)')
             serve(app, host=host, port=port, threads=8,
-                  max_request_body_size=_waitress_max_body_bytes)
+                  max_request_body_size=_waitress_max_body_bytes,
+                  channel_timeout=_waitress_channel_timeout)
         except ImportError:
             app.run(debug=debug, host=host, port=port, threaded=True)

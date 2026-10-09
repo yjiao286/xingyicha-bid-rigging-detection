@@ -127,7 +127,7 @@ lsof -ti:5001 | xargs kill -9
 
 - 端口：`5001`
 - 上传目录：环境变量 `UPLOAD_FOLDER` 或临时目录；文件名 uuid 前缀防并发覆盖
-- 上传上限：**默认不限制**（`MAX_CONTENT_LENGTH_MB` 设置后生效；413 由 `_too_large` errorhandler 返回 JSON 便于前端提示。桌面版 waitress 的 `max_request_body_size` 须同步放宽——`_waitress_max_body_bytes` 默认 32GB、设了限额取 2 倍——否则 waitress 原生 1GB 上限会在服务器层把超限请求拦在 Flask 之外，浏览器只看到裸 413 兜底文案或连接中断的 "Failed to fetch"；两处 `serve()` 与该常量的关系由 `t_waitress_body_cap_matches_upload_policy` 守护）
+- 上传上限：**默认不限制**（`MAX_CONTENT_LENGTH_MB` 设置后生效；413 由 `_too_large` errorhandler 返回 JSON 便于前端提示。桌面版 waitress 的 `max_request_body_size` 须同步放宽——`_waitress_max_body_bytes` 默认 32GB、设了限额取 2 倍——否则 waitress 原生 1GB 上限会在服务器层把超限请求拦在 Flask 之外，浏览器只看到裸 413 兜底文案或连接中断的 "Failed to fetch"；两处 `serve()` 与该常量的关系由 `t_waitress_body_cap_matches_upload_policy` 守护。`_waitress_channel_timeout`（默认 ANALYSIS_TIMEOUT+300=3900s）与 `_iter_stream_events` 的 10s 心跳同理：分析期间并行提取只转发 OCR 类事件，纯 docx/文字PDF 批次可静默数分钟，waitress 原生 120s channel_timeout 会自割连接、带网络超时的浏览器/EDR HTTP 过滤也会掐（前端 "network error"，waitress 日志 "Client disconnected while serving"），心跳事件前端按未知 type 静默忽略，由 `t_waitress_channel_timeout_covers_analysis_budget` / `t_stream_heartbeat_during_silence` 守护）
 - `ANALYSIS_TIMEOUT`：3600 秒（默认，< gunicorn timeout 3900；OCR 全放开后大扫描件可达数十分钟）
 - `MAX_PDF_PAGES`：0 = 不限页数（默认）；`MAX_FILE_SIZE_MB=300`/`MAX_TOTAL_SIZE_MB=500` 仅 UI 警告不阻止
 - `requirements.txt`：flask, python-docx, pypdf, gunicorn, olefile, openpyxl（xlsx）, pymupdf + rapidocr-onnxruntime（扫描件 OCR 回退）, pymupdf-layout（表格版面分析增强，精确锁 PyMuPDF==1.28.2，可选缺失降级）
