@@ -3951,6 +3951,39 @@ def _is_price_summary_row(line):
     """True for the 合计报价 / 总计 row of a 分项报价表."""
     return bool(_SUMMARY_ROW_RE.match(line.strip()))
 
+
+# ── 通用章节头识别 ──────────────────────────────────────────────
+# 报价表章节窗口的终止判定原来是一份固定清单（'\n三、'..'\n七、' + '\n3.'..'\n7.'），
+# 编到 八、九、十 或 （一）/第X章/7.1 的标书挡不住（窗口越过报价表把后续章节的
+# 表也圈进来），反过来备注列以"三、"开头的行又会提前截断表格。这里用一个通用的
+# "独立章节头行"判据替代：编号体系（第X章/一、/2./7.1/（三）/"3 技术方案"）开头、
+# 行内除编号外无数字（表头/数据行都带价格或数量）、无管道符（docx 表格行）。
+_SEC_BOUNDARY_NUM = (r'(?:第[一二三四五六七八九十百\d]{1,4}[章节部分]'
+                     r'|[一二三四五六七八九十]{1,3}[、.]'
+                     r'|\d{1,2}[、.．]'
+                     r'|\d+(?:\.\d+)+'
+                     r'|[（(][一二三四五六七八九十\d]{1,3}[）)])')
+_SEC_BOUNDARY_RE = re.compile(
+    r'(?:' + _SEC_BOUNDARY_NUM + r')[\s\u3000]*'
+    r'[一-鿿][一-鿿A-Za-z（）()、，,]{0,38}$'
+    r'|\d{1,2}\s+[一-鿿]{5,10}$')
+
+
+def _is_section_boundary(line):
+    """True when a standalone line is a section header, not table content.
+
+    Used to bound the 报价表 section window and to end a table parse at the
+    next real chapter. Deliberately conservative: >40 chars, any 3+ digit
+    run, or a pipe excludes the line — headers are titles, data rows carry
+    prices/quantities/codes.
+    """
+    if not line or len(line) > 40 or '|' in line:
+        return False
+    s = line.strip()
+    if not s or re.search(r'\d{3,}', s):
+        return False
+    return bool(_SEC_BOUNDARY_RE.match(s))
+
 # Arabic amount with optional 万元/亿/元 suffix captured into the group, so
 # '12.5万元' / '126181976.30元' keep their magnitude through _parse_amount.
 # (A bare [\d,]+\.?\d* alternation would stop before the unit and lose x10000.)
@@ -4901,13 +4934,13 @@ def _extract_structured_items(text, result):
         '项目报价', '费用构成', '费用表'
     ]
 
-    bid_section = None
     # Build alternation pattern from keywords.
     # 关键词必须是"整词"：'设备清单装入各部分的包装箱中。' 里的『设备清单』只是
     # 技术条款句子的一部分，`[^\n]*` 会让它整体命中并把该段当成分项报价章节
     # （投标人F 1057 页的实际选段）。紧随其后的汉字即否决；标点/空白/结尾
     # 才允许（'分项报价表（二）'、'开标一览表：'、'报价明细表 ' 都还在）。
     kw_pattern = '|'.join(re.escape(kw) for kw in section_keywords)
+    section_spans = []
     for m in re.finditer(
         r'(?:^|\n)(?:[一二三四五六七八九十\d]+[、.。]\s*|\d+(?:\.\d+)+\s*|\d+\s+)?(' +
         kw_pattern + r')(?![一-鿿])[^\n]*\n', text
@@ -4931,21 +4964,19 @@ def _extract_structured_items(text, result):
         if re.search(r'\.{3,}', prefix) or re.search(r'P\d+\s*[-–—~]\s*\d+', toc_line) \
                 or re.search(r'[\t ]\d{1,4}\s*$', toc_line):
             continue
-        # Find next major section boundary
+        # ── Find next major section boundary ──
+        # 通用章节头识别（_is_section_boundary：第X章/一、/2./7.1/（三））替代
+        # 旧的固定标记清单（'\n三、'..'\n七、' + '\n3.'..'\n7.'）——编到 八、
+        # 九、十 或字母/括号编号体系的标书挡不住，窗口越过报价表把后续章节的
+        # 表也圈进来（污染）；反之数据行以"三、"开头又会提前截断（缺行）。
         next_pos = len(text)
-        for end_marker in ['\n三、', '\n四、', '\n五、', '\n六、', '\n七、',
-                           '\n3.', '\n4.', '\n5.', '\n6.', '\n7.']:
-            ep = text.find(end_marker, pos + 10)
-            if ep > pos and ep < next_pos:
-                next_pos = ep
-        # Also stop at section headers (number + 5+ Chinese chars, no price amounts)
-        for sm in re.finditer(r'\n(\d{1,2})\s+[一-鿿]{5,}', text):
-            if sm.start() > pos + 20 and sm.start() < next_pos:
-                line_end = text.find('\n', sm.end())
-                line = text[sm.start()+1:line_end if line_end > sm.start() else sm.end()+80]
-                if len(line) < 60 and not re.search(r'\d{4,}', line):
-                    next_pos = sm.start()
-                    break
+        _win = text[m.end():m.end() + 30000]
+        for _seg in re.finditer(r'[^\n]+', _win):
+            if _is_section_boundary(_seg.group()):
+                _cand = m.end() + _seg.start()
+                if _cand > pos + 30:
+                    next_pos = _cand
+                break
         bid_section = text[pos:next_pos]
         # 选段必须真的带报价信号：技术条款里的一句话命中关键词是常见形态
         # （'设备清单装入各部分的包装箱中。'），那段里的规格表会被当成分项
@@ -4953,22 +4984,103 @@ def _extract_structured_items(text, result):
         if not re.search(r'单价|总价|报价|金额|价格|含税|不含税|税率|元\s*[/／）)]|'
                          r'[￥¥]|\d+\.\d{2}\s*(?:元)?|'
                          r'(?<!\d)\d{5,}(?!\d)', bid_section):
-            bid_section = None
-        if bid_section:
-            break
+            continue
+        if next_pos - pos > 30:
+            section_spans.append((pos, next_pos))
 
-    if bid_section:
-        # Detect docx pipe-separated tables (vs PDF space-separated)
-        pipe_lines = len(re.findall(r'\n[^|\n]+\|[^|\n]+\|[^\n]+', bid_section))
-        if pipe_lines >= 2:
-            _parse_docx_bid_table(bid_section, result)
+    # 一个文档可以有多张分项报价表（货物分项 + 服务分项 / 多标段各一张）：
+    # 全部解析，完全落在已收章节内的重复命中跳过，上限 8 个防性能退化。
+    _dedup_spans = []
+    for _s, _e in section_spans:
+        if any(_s >= _ps and _e <= _pe for _ps, _pe in _dedup_spans):
+            continue
+        _dedup_spans.append((_s, _e))
+    section_spans = _dedup_spans[:8]
+
+    # ── 解析全部章节（旧实现只解析第一个命中章节，多表标书必缺）──
+    section_items = []
+    section_totals = []
+    section_regions = []      # 章节路径命中的管道区域：续页纯文本补扫的锚
+
+    def _collect_section_parse(tmp):
+        section_items.extend(tmp.get('subItemPrice') or [])
+        if tmp.get('totalPrice') is not None:
+            section_totals.append((tmp['totalPrice'], tmp.get('totalPriceInTax')))
+        for w in tmp.get('warnings') or []:
+            if w not in result.setdefault('warnings', []):
+                result['warnings'].append(w)
+
+    for _s, _e in section_spans:
+        sec = text[_s:_e]
+        if len(re.findall(r'\n[^|\n]+\|[^|\n]+\|[^\n]+', sec)) >= 2:
+            # 管道表：按区域分割并逐区域过闸（与全文扫描器同一套防御），
+            # 旧实现把整个章节直通解析器，窗口圈进来的业绩表/资审表只能靠
+            # 行级守卫兜。
+            _sec_lines = sec.split('\n')
+            for _rs, _re in _split_pipe_regions(_sec_lines, min_lines=2):
+                _region = '\n'.join(_sec_lines[_rs:_re])
+                if not _pipe_region_is_price(_region, require_score=False):
+                    continue
+                _tmp = {'subItemPrice': [], 'totalPrice': None,
+                        'totalPriceInTax': None, 'warnings': []}
+                _parse_docx_bid_table(_region, _tmp)
+                _collect_section_parse(_tmp)
+                section_regions.append(_region)
         else:
-            _parse_pdf_bid_table(bid_section, result)
+            _tmp = {'subItemPrice': [], 'totalPrice': None,
+                    'totalPriceInTax': None, 'warnings': []}
+            _parse_pdf_bid_table(sec, _tmp)
+            _collect_section_parse(_tmp)
 
-    # ── Smart docx table scan: find pricing-relevant pipe tables anywhere in text ──
-    # Score each pipe table region by pricing relevance and parse only the best ones
-    if not result.get('subItemPrice'):
-        _scan_docx_tables_for_pricing(text, result)
+    # ── Smart docx table scan: ALWAYS runs now ──
+    # 旧实现只在章节解析产出 0 项时才扫：第一个章节哪怕只出几项，文档里其他
+    # 报价表（另一章节/另一张无关键词标题的表）就整体丢失。现在必跑，靠全局
+    # 去重避免与章节路径重复计数。
+    _scan_tmp = {'subItemPrice': [], 'totalPrice': None,
+                 'totalPriceInTax': None, 'warnings': []}
+    _scan_docx_tables_for_pricing(text, _scan_tmp)
+    if _scan_tmp.get('totalPrice') is not None:
+        section_totals.append((_scan_tmp['totalPrice'],
+                               _scan_tmp.get('totalPriceInTax')))
+
+    all_items = list(section_items) + list(_scan_tmp.get('subItemPrice') or [])
+    # 章节路径命中的管道区域同样要补扫续页纯文本行（此前只有扫描器区域会，
+    # 章节路径的跨页表后半段整段丢失）。编码锚判据不变。
+    if section_regions:
+        all_items.extend(_parse_flattened_bid_rows(text.split('\n'), section_regions))
+    # 全局去重：同名同单价同总价同序号才视为同一行（同名同价不同序号是两行
+    # 合法数据，旧键漏了序号会误并）。
+    _merged_items, _seen_keys = [], set()
+    for _it in all_items:
+        _key = (re.sub(r'\s+', '', _it.get('priceName') or ''),
+                _it.get('unitPrice'), _it.get('totalPrice'), _it.get('_seq'))
+        if _key in _seen_keys:
+            continue
+        _seen_keys.add(_key)
+        _merged_items.append(_it)
+    if _merged_items:
+        result['subItemPrice'] = _merged_items
+
+    # ── 总价仲裁：表内合计只填补缺失，绝不覆写已采用总价 ──
+    # 旧行为无条件覆写：分项表的合计行会冲掉前面投标函通道已定的总价，
+    # 原件两处不一致时谁后到谁赢。现在保留先到的（标签通道优先），不一致
+    # 给告警提示人工复核。
+    if result.get('totalPrice') is None:
+        for _tv, _tin in section_totals:
+            if _tv is not None:
+                result['totalPrice'] = _tv
+                if result.get('totalPriceInTax') is None and _tin is not None:
+                    result['totalPriceInTax'] = _tin
+                break
+    else:
+        _adopted = result['totalPrice']
+        for _tv, _tin in section_totals:
+            if _tv is not None and _tv != _adopted \
+                    and abs(_tv - _adopted) > max(1.0, _adopted * 0.005):
+                result['warnings'].append(
+                    f'分项表合计行总价 {_tv:,.0f} 与已采用总价 {_adopted:,.0f} '
+                    f'不一致，已保留后者（原件多处不一致，建议人工复核）')
+                break
 
     # ── Generic cost line extraction ──
     # Normalize cost names for dedup and noise filtering
@@ -5372,6 +5484,26 @@ def _validate_price_extraction(text, result, bid_section):
                 f'分项合计({sub_sum:,.0f})与总价({total_now:,.0f})差异 {diff:.0%}，'
                 f'报价或分项可能提取不完整')
 
+    # ── 分项序号完整性自检 ──
+    # 报价表几乎都带序号列。序号最大值 vs 实际行数能直接暴露缺行——此前缺行
+    # 完全静默（tools/row_completeness.py 只在外部核对）。序号证据由各解析
+    # 通道写入 `_seq`（序号列/编码续页行/行首序号），用完即剥，不进结果。
+    _items = result.get('subItemPrice') or []
+    _seq_list = [it.get('_seq') for it in _items if isinstance(it.get('_seq'), int)]
+    if _seq_list and len(_seq_list) >= max(4, int(len(_items) * 0.6)):
+        _mx = max(_seq_list)
+        if 3 < _mx <= 2000:
+            _missing = sorted(set(range(1, _mx + 1)) - set(_seq_list))
+            if _missing and len(_missing) <= 200:
+                _ex = '、'.join(str(x) for x in _missing[:8])
+                if len(_missing) > 8:
+                    _ex += '…'
+                result['warnings'].append(
+                    f'分项报价表序号最大 {_mx}，实际提取 {len(_items)} 行，'
+                    f'缺 {len(_missing)} 行（{_ex}），分项可能提取不完整，建议人工复核')
+    for it in _items:
+        it.pop('_seq', None)
+
     # ── Provenance note: total came from full-text fallback ──
     # 警告文案说的是"未定位到报价章节"，所以只在**真的没定位到章节**时才给：
     # 找到章节但金额是从投标函的「￥【54267】」取的，是正常路径而不是兜底
@@ -5436,6 +5568,10 @@ def _parse_pdf_bid_table(section, result):
 
     # ── Column type inference from header ──
     col_order = _infer_columns(lines[header_line])
+    # 表头声明了价格列（单价/总价）与序号列——后面两处收行判据要用：
+    # 声明了价格列的表，单价格行也是报价行；声明了序号列的表，行首数字是行号。
+    hdr_declares_price = any(c.startswith(('unit_price', 'total')) for c in col_order)
+    hdr_declares_seq = 'seq' in col_order
 
     # ── Data row parsing ──
     data_end = None
@@ -5446,7 +5582,7 @@ def _parse_pdf_bid_table(section, result):
         if any(s.startswith(kw) for kw in ['合计', '总价', '小计', '总计', '注：', '备注：']):
             data_end = i
             break
-        if re.match(r'^[三四五六七八九十]、', s):
+        if _is_section_boundary(s):
             data_end = i
             break
     if data_end is None:
@@ -5473,7 +5609,12 @@ def _parse_pdf_bid_table(section, result):
         # 名称续行塞进上一行，'855' 也就永远进不了价格池。
         # 单个 '|' 的行不算（散文里的斜杠列表），但这类行里若出现 4+ 位
         # 数字或 x万，仍按数据行处理。
-        has_amounts = s.count('|') >= 3 or bool(re.search(r'(\d{4,}|[\d.]+\s*万)', s))
+        has_amounts = (s.count('|') >= 3
+                       or bool(re.search(r'(\d{4,}|[\d.]+\s*万)', s))
+                       # 表头声明了价格列的表，独立 2-3 位小价格也是数据行
+                       # （'1 维保服务 项 855' 整行曾被当名称续行丢掉）
+                       or (hdr_declares_price
+                           and bool(re.search(r'(?<!\d)\d{2,}(?!\d)', s))))
         if has_amounts:
             if pending_name:
                 merged_rows.append((''.join(pending_name), s))
@@ -5511,6 +5652,13 @@ def _parse_pdf_bid_table(section, result):
         if len(name) < 2:
             continue
 
+        # 行号证据（缺行自检用）：声明了序号列的表，行首 1-4 位数字是行号
+        row_seq = None
+        if hdr_declares_seq:
+            _sq = re.match(r'^(\d{1,4})\s', data)
+            if _sq and 1 <= int(_sq.group(1)) <= 2000:
+                row_seq = int(_sq.group(1))
+
         # Extract numbers (strip leading row number first)
         data = re.sub(r'^\d+\s*', '', data).strip()
         uses_wan = '万' in data
@@ -5525,18 +5673,31 @@ def _parse_pdf_bid_table(section, result):
             nums = re.findall(r'(\d+(?:\.\d+)?)', data)
             nums_parsed = [float(n) for n in nums]
 
-        if len(nums_parsed) < 2:
+        # 手机号/身份证/银行账号/编码（≥11 位连续数字）不是金额：PDF 空格
+        # 通道把 11 位手机号当成 1.39e10 的"总价"曾是实测污染形态。
+        if _looks_like_identifier_cell(data) or any(v >= 1e10 for v in nums_parsed):
             continue
+        # 裸年份不是金额（服务期/年份列：2024/2025…，整数且带日期语境）
+        nums_parsed = [v for v in nums_parsed
+                       if not (v == int(v) and _is_bare_year_value(v, str(int(v)), data))]
+
+        if len(nums_parsed) < 2:
+            # 表头声明了价格列的表，"名称 + 单价"两字段的行也是报价行
+            # （旧判据整行丢掉，分项永远缺行）；没声明价格列的保持旧门槛。
+            if not (hdr_declares_price and len(nums_parsed) == 1):
+                continue
 
         # Separate small values (count, tax rate) from large values (prices)
         smalls = [v for v in nums_parsed if v < 100]
         larges = [v for v in nums_parsed if v >= 100]
 
         if len(larges) < 2:
-            continue
+            if not (hdr_declares_price and len(larges) == 1):
+                continue
 
         # ── Column mapping using inferred order ──
-        item = {'priceName': name, 'unit': '项', 'extras': {}, 'details': []}
+        item = {'priceName': name, 'unit': '项', 'extras': {}, 'details': [],
+                '_seq': row_seq}
 
         _assign_columns(item, nums_parsed, smalls, larges, col_order, uses_wan)
 
@@ -5571,12 +5732,25 @@ def _infer_columns(header_line):
         (r'总价\s*[（(]?\s*含税\s*[）)]?|含税\s*总价', 'total_in'),
         (r'税\s*率', 'tax_rate'),
         (r'备\s*注', 'remark'),
+        # 通用兜底：无税注的 '单价（元）'/'总价（元）' 是服务类表最常见的
+        # 表头形态，此前一个价格探测器都匹配不上（PDF 通道因此把单价格行
+        # 整行丢弃）。与 ex/in 探测器按位置去重，特定形态优先。
+        (r'单价|费率', 'unit_price'),
+        (r'总价|金额', 'total_price'),
     ]
     for pattern, col_type in detectors:
         m = re.search(pattern, header_line)
         if m:
             col_map.append((col_type, m.start()))
-    col_map.sort(key=lambda x: x[1])
+
+    # 同一位置只保留一个类型（ex/in 特定形态胜出通用形态）
+    _specific = {'unit_price_ex', 'unit_price_in', 'total_ex', 'total_in'}
+    _by_pos = {}
+    for t, p in col_map:
+        cur = _by_pos.get(p)
+        if cur is None or (t in _specific and cur not in _specific):
+            _by_pos[p] = t
+    col_map = sorted(((t, p) for p, t in _by_pos.items()), key=lambda x: x[1])
 
     # If no explicit ex/in split, use generic unit_price/total labels
     has_explicit = any(c[0] in ('unit_price_ex', 'unit_price_in', 'total_ex', 'total_in') for c in col_map)
@@ -5631,6 +5805,32 @@ def _assign_columns(item, all_nums, smalls, larges, col_order, uses_wan):
         item['unitPrice'] = larges[0]
         item['totalPrice'] = larges[1]
         item['totalPriceInTax'] = larges[1]
+    elif len(larges) == 1:
+        # 表头声明了价格列的单价格行：单价即该行金额（与 docx 通道同口径，
+        # 见 _parse_docx_rows 的 n==1 分支）
+        item['unitPrice'] = larges[0]
+        item['totalPrice'] = larges[0]
+        item['totalPriceInTax'] = larges[0]
+
+
+def _promote_table_total(val, in_tax, result):
+    """表内合计行总价：只填补缺失；与已采用总价不一致时告警，绝不覆写。
+
+    旧行为无条件覆写 result['totalPrice']——分项表的合计行会冲掉前面投标函
+    通道已定的总价，原件两处不一致时谁后到谁赢（投标人K：分项表/合计行/
+    一览表三处互不一致）。保留先到的（标签通道优先），分歧交给告警。
+    """
+    if val is None:
+        return
+    if result.get('totalPrice') is None:
+        result['totalPrice'] = val
+        if result.get('totalPriceInTax') is None and in_tax is not None:
+            result['totalPriceInTax'] = in_tax
+        return
+    if abs(val - result['totalPrice']) > max(1.0, result['totalPrice'] * 0.005):
+        result.setdefault('warnings', []).append(
+            f'分项表合计行总价 {val:,.0f} 与已采用总价 {result["totalPrice"]:,.0f} '
+            f'不一致，已保留后者（原件多处不一致，建议人工复核）')
 
 
 def _extract_summary_total(section, result):
@@ -5642,9 +5842,7 @@ def _extract_summary_total(section, result):
         if m:
             val = float(m.group(1))
             if val >= 10000:
-                result['totalPrice'] = val
-                if result['totalPriceInTax'] is None:
-                    result['totalPriceInTax'] = val
+                _promote_table_total(val, val, result)
                 return
         # Pattern: "合计 | ... (many cols) ... | 893000元 | 1009090元" (wide pipe row)
         # Search for rows starting with kw and having 2+ large numbers near the end
@@ -5658,21 +5856,19 @@ def _extract_summary_total(section, result):
                     nums.append(float(nm.group(1)))
             large = [n for n in nums if n >= 50000]
             if len(large) >= 2:
-                result['totalPrice'] = large[-2]
-                result['totalPriceInTax'] = large[-1]
+                _promote_table_total(large[-2], large[-1], result)
                 return
             elif len(large) == 1 and large[0] >= 100000:
-                result['totalPrice'] = large[0]
-                result['totalPriceInTax'] = large[0]
+                _promote_table_total(large[0], large[0], result)
                 return
         # Standard ws-separated
         m = re.search(kw + r'\s+([\d.]+)\s*万', section)
         if m:
-            result['totalPrice'] = _parse_amount(m.group(1) + '万')
+            _promote_table_total(_parse_amount(m.group(1) + '万'), None, result)
             return
         m = re.search(kw + r'\s+(\d{5,12}(?:\.\d{2})?)', section)
         if m:
-            result['totalPrice'] = float(m.group(1))
+            _promote_table_total(float(m.group(1)), None, result)
             return
 
 
@@ -5745,7 +5941,7 @@ def _parse_flattened_bid_rows(lines, accepted_regions):
                 consec_seq = 0
                 continue
             if raw.startswith(('合计', '注', '注：', '=')) or \
-                    re.match(r'^(?:第[一二三四五六七八九十]+[章节]|[一二三四五六七八九十]+、)', raw):
+                    _is_section_boundary(raw):
                 # 合计行 / 注释 / 章节标题 => the price table is over
                 flush(buf)
                 buf = None
@@ -5823,14 +6019,67 @@ def _flattened_row_to_item(buf):
         'tax': None,
         'unitPrice': price, 'totalPrice': price, 'totalPriceInTax': price,
         'extras': {}, 'details': [],
+        '_seq': int(seq) if seq.isdigit() else None,
     }
 
 
-def _scan_docx_tables_for_pricing(text, result):
-    """Scan full text for pipe-separated tables and parse only the most pricing-relevant ones.
-    Filters out personnel, project history, tech spec tables by scoring header keywords."""
-    # Split text into pipe-table regions (consecutive lines with |)
-    lines = text.split('\n')
+# ── 管道表区域助手（章节路径与全文扫描器共用）──────────────────
+# 报价表有两条进入路径：关键词章节窗口（_extract_structured_items）与全文管道
+# 区域扫描（_scan_docx_tables_for_pricing）。此前只有扫描器有区域级防御
+# （非报价词一票否决/列语义重合度），章节路径直通解析器，窗口圈进来的邻表
+# （业绩表/资审表）只能靠行级守卫兜。两道闸统一在这里。
+_PRICE_COL_KW = ('单价', '总价', '税率', '金额', '价格', '报价', '不含税', '含税')
+# 业绩/资格/技术章节的表同样带"价格（元）""供货数量""签订合同时间"列，评分
+# 拦不住：投标人H的业绩一览表整表进了分项报价（'管阀件 一批 = 2575568'，
+# 那是历史合同金额）。表头词一票否决，与 _filter_price_items 同口径。
+_NON_PRICE_TABLE_KW = (
+    '出差事由', '合同金额', '项目名称', '职务', '岗位', '职称',
+    '联系人', '联系电话', '项目经理', '指标要求', '功能要求',
+    '注册资金', '注册资本', '邮政编码', '银行账号', '开户行',
+    '信用代码', '成立日期', '经营范围', '资质等级', '营业执照',
+    '买方名称', '卖方名称', '工程名称', '项目概况', '供货数量',
+    '签订合同', '使用地点', '履约情况', '规格型号', '主要技术',
+    '业绩', '用户名称', '甲方', '乙方', '合同价格', '合同名称',
+    '开竣工', '验收', '项目所在地', '发包人', '承包人')
+# 强标记子集：候选表头没有投标价列时，行内容带 ≥2 个强标记即判非报价表。
+# 区域合并会把相邻表缝进同一管道区域（bidprice 快路放行了整个区域），
+# 业绩表/资审表要在**表头候选**这一层再挡一次。
+_STRONG_NON_PRICE_KW = (
+    '合同金额', '合同价格', '签订合同', '买方名称', '卖方名称', '业绩',
+    '营业执照', '信用代码', '注册资金', '注册资本', '银行账号', '开户行',
+    '联系电话', '出差事由', '甲方', '乙方', '供货数量', '履约情况')
+
+
+def _best_header_roles(region_text):
+    """Best header row's (hits, role-set) for a pipe region, or None.
+
+    Only a genuine header row may define column semantics: data rows often
+    carry the words 名称规格/投标单价 inside their own spec text（投标人F
+    row 802 hits=5）， letting one of them define roles read the 限价表 as a
+    bid table and merged 46 limit rows into the sub-items.
+    """
+    hdr_any_kw = (r'(?:序号|名称|分项|数量|单位|单价|总价|税率|型号|规格|厂家|'
+                  r'备注|产品|服务|编码)')
+    best = None
+    for line in region_text.split('\n'):
+        if '|' not in line:
+            continue
+        cells = [c.strip() for c in line.split('|')]
+        if not _looks_like_header_row(cells, hdr_any_kw):
+            continue
+        hits = sum(1 for c in cells if re.search(hdr_any_kw, c))
+        if hits >= 2 and (best is None or hits > best[0]):
+            best = (hits, frozenset(r for r in _infer_column_roles(cells) if r))
+    return best
+
+
+def _split_pipe_regions(lines, min_lines=3):
+    """(start, end) line ranges of pipe-table regions, near ones merged.
+
+    Regions at most 6 non-pipe lines apart merge — a table whose header or a
+    wrapped row lost its pipes for a few lines is still ONE table. Fewer than
+    min_lines pipe lines is prose-with-slashes noise, dropped.
+    """
     regions = []
     region_start = -1
     for i, line in enumerate(lines):
@@ -5838,80 +6087,81 @@ def _scan_docx_tables_for_pricing(text, result):
         if has_pipe and region_start < 0:
             region_start = i
         elif not has_pipe and region_start >= 0:
-            if i - region_start >= 3:  # at least 3 pipe lines
+            if i - region_start >= min_lines:
                 regions.append((region_start, i))
             region_start = -1
-    if region_start >= 0 and len(lines) - region_start >= 3:
+    if region_start >= 0 and len(lines) - region_start >= min_lines:
         regions.append((region_start, len(lines)))
-
-    # Merge nearby regions (gap <= 6 non-pipe lines) to handle split multi-line headers
     merged = []
     for start, end in regions:
         if merged and start - merged[-1][1] <= 6:
             merged[-1] = (merged[-1][0], end)
         else:
             merged.append((start, end))
-    regions = merged
+    return merged
 
+
+def _pipe_region_is_price(region_text, require_score=True):
+    """Region-level gate: does this pipe table carry THIS bid's prices?
+
+    Escalating signals: an explicit bid-price column (投标单价/磋商报价…) is
+    decisive evidence — including tables that ALSO carry 限价 or 规格型号
+    columns; a nonbid-only header (限价/控制价/合同价…) is never ours.
+
+    require_score=True（全文扫描器路径，无章节证据）：还需过评分门槛——
+    价格列关键词 + 大数字，非报价词表作扣分。require_score=False（关键词
+    章节路径）：章节命中+报价信号已是证据，只做否决（限价表/业绩资审强
+    标记）——服务类表头常带『项目名称』列（在非报价词表里），评分门槛会
+    把真报价表误杀（投标人K实测 0 项）。
+    """
+    hdr = _best_header_roles(region_text)
+    roles = hdr[1] if hdr else frozenset()
+    if 'bidprice' in roles:
+        return True
+    if 'nonbid' in roles:
+        return False
+    if sum(1 for kw in _STRONG_NON_PRICE_KW if kw in region_text) >= 2:
+        return False
+    if not require_score:
+        return True
+    non_price_hits = sum(1 for kw in _NON_PRICE_TABLE_KW if kw in region_text)
+    score = 0
+    if non_price_hits == 0:
+        score += 3 * sum(1 for kw in _PRICE_COL_KW if kw in region_text)
+    score += min(len(re.findall(r'\b\d{5,}(?:\.\d{2})?\b', region_text)), 10)
+    score -= 2 * non_price_hits
+    return score >= 5
+
+
+def _scan_docx_tables_for_pricing(text, result):
+    """Scan full text for pipe-separated tables and parse only the most pricing-relevant ones.
+    Filters out personnel, project history, tech spec tables by scoring header keywords."""
+    lines = text.split('\n')
+    regions = _split_pipe_regions(lines)
     if not regions:
         return
 
-    # Score each region for pricing relevance
-    PRICE_COL_KW = ['单价', '总价', '税率', '金额', '价格', '报价', '不含税', '含税']
-    # 业绩/资格/技术章节的表同样带"价格（元）""供货数量""签订合同时间"列，评分
-    # 拦不住：投标人H的业绩一览表整表进了分项报价（'管阀件 一批 = 2575568'，
-    # 那是历史合同金额）。表头词一票否决，与 _filter_price_items 同口径。
-    NON_PRICE_KW = ['出差事由', '合同金额', '项目名称', '职务', '岗位', '职称',
-                    '联系人', '联系电话', '项目经理', '指标要求', '功能要求',
-                    '注册资金', '注册资本', '邮政编码', '银行账号', '开户行',
-                    '信用代码', '成立日期', '经营范围', '资质等级', '营业执照',
-                    '买方名称', '卖方名称', '工程名称', '项目概况', '供货数量',
-                    '签订合同', '使用地点', '履约情况', '规格型号', '主要技术',
-                    '业绩', '用户名称', '甲方', '乙方', '合同价格', '合同名称',
-                    '开竣工', '验收', '项目所在地', '发包人', '承包人']
+    # Score each region for pricing relevance (see _pipe_region_is_price for
+    # the same gate applied to keyword-section regions)
     scored = []
     for start, end in regions:
         region_text = '\n'.join(lines[start:end])
-        score = 0
-        # Penalty FIRST: '合同金额' contains '金额', so a project-history
-        # table scored net +1 (3-2) and its 2024.1 contract dates were read
-        # as sub-item prices. A non-price keyword kill outweighs any bonus.
-        non_price_hits = sum(1 for kw in NON_PRICE_KW if kw in region_text)
-        # Bonus for pricing column headers (skipped when killed)
-        if non_price_hits == 0:
-            for kw in PRICE_COL_KW:
-                if kw in region_text:
-                    score += 3
-        score -= 2 * non_price_hits
-        # Bonus for having rows with large numbers (>= 10000)
-        large_count = len(re.findall(r'\b\d{5,}(?:\.\d{2})?\b', region_text))
-        score += min(large_count, 10)
+        hdr = _best_header_roles(region_text)
+        roles = hdr[1] if hdr else frozenset()
+        if 'nonbid' in roles and 'bidprice' not in roles:
+            continue      # 招标方限价表：行数更多、长数字更多，评分反而更高
+        if 'bidprice' in roles:
+            score = 10 ** 6     # explicit bid-price column: decisive
+        else:
+            non_price_hits = sum(1 for kw in _NON_PRICE_TABLE_KW if kw in region_text)
+            score = 0
+            if non_price_hits == 0:
+                score += 3 * sum(1 for kw in _PRICE_COL_KW if kw in region_text)
+            score += min(len(re.findall(r'\b\d{5,}(?:\.\d{2})?\b', region_text)), 10)
+            score -= 2 * non_price_hits
+            if score < 5:
+                continue
         scored.append((score, region_text))
-
-    # 分区候选：同分项报价表跨页时会有多段（每段自带表头），它们必须合并；
-    # 但业绩表/人员表这类"另一个表"必须排除。
-    # 判据：与最高分段的表头列语义集合重合（用 _infer_column_roles 归一，
-    # 免得 '计量\n单位' 与 '计量单位' 这种排版差异被判成两张表）。
-    _HDR_ANY_KW = (r'(?:序号|名称|分项|数量|单位|单价|总价|税率|型号|规格|厂家|'
-                   r'备注|产品|服务|编码)')
-
-    def _hdr_roles(region_text):
-        best = None
-        for line in region_text.split('\n'):
-            if '|' not in line:
-                continue
-            cells = [c.strip() for c in line.split('|')]
-            if not _looks_like_header_row(cells, _HDR_ANY_KW):
-                # 数据行也常命中『名称规格/计量单位/投标单价』（那一行是产品名），
-                # 只有真正的表头行才能决定列语义——否则『含税单价限价』表会被
-                # 认成投标价表并整体并入（投标人F 46 行限价混进分项报价）。
-                continue
-            hits = sum(1 for c in cells if re.search(_HDR_ANY_KW, c))
-            if hits >= 2 and (best is None or hits > best[0]):
-                best = (hits, frozenset(r for r in _infer_column_roles(cells) if r))
-        return best
-
-    scored = [s for s in scored if s[0] >= 5]
 
     # 参考分区必须真的是**投标价**表：招标人公开的最高限价表（'含税单价限价'）
     # 往往行数更多、长数字更多，评分反而更高（投标人F 4111 段 16 分 vs 报价表
@@ -5922,7 +6172,7 @@ def _scan_docx_tables_for_pricing(text, result):
 
     def _roles_of(region_text, key):
         if key not in _role_cache:
-            _role_cache[key] = _hdr_roles(region_text)
+            _role_cache[key] = _best_header_roles(region_text)
         return _role_cache[key]
 
     _ref = None
@@ -5943,7 +6193,10 @@ def _scan_docx_tables_for_pricing(text, result):
         # 限价表本身不解析（它的数字不是投标价）
         if cur and 'nonbid' in cur and 'bidprice' not in cur:
             continue
-        if best_roles and cur:
+        # 显式投标价列免参考重合度检查：同一文档里可以有**不同结构**的报价表
+        # （货物分项表带编码列 + 服务分项表不带），旧判据拿单一参考表卡死了
+        # 异构第二张表——列语义本身就是足够强的证据。
+        if best_roles and cur and 'bidprice' not in cur:
             overlap = len(best_roles & cur) / max(1, min(len(best_roles), len(cur)))
             # 表头列语义重合度低 => 这是另一张表，不是分项报价表的续页
             if overlap < 0.6 or not (best_roles & _PRICE_ROLES):
@@ -5996,6 +6249,13 @@ def _parse_docx_bid_table(section, result):
             # （投标人F row 802 hits=5）。行内出现独立数字即判数据行。
             if not _looks_like_header_row(parts, HEADER_KW):
                 continue
+            # 一个管道区域可能并置两张表（区域合并把相邻表缝在一起）：候选
+            # 表头没有投标价列、且其行内容带 ≥2 个业绩/资审强标记时，这张表
+            # 不是报价表——'合同金额'列的数字是历史合同额，不是本标分项。
+            if not any(r == 'bidprice' for r in roles):
+                _ctx = '\n'.join(lines[i:i + 40])
+                if sum(1 for kw in _STRONG_NON_PRICE_KW if kw in _ctx) >= 2:
+                    continue
             price_score = sum(1 for p in parts if re.search(PRICE_KW, p))
             candidates.append((price_score, hits, i))
 
@@ -6008,7 +6268,9 @@ def _parse_docx_bid_table(section, result):
     for _, _, hdr_idx in candidates[:10]:
         items = _parse_docx_rows(lines, hdr_idx, HEADER_KW)
         for item in items:
-            key = (item['priceName'], item.get('totalPrice'))
+            # 同名同价但序号不同是两行合法数据（多表头各自解析时同名行常见），
+            # 序号相同（或都无序号）才视为同一行去重
+            key = (item['priceName'], item.get('totalPrice'), item.get('_seq'))
             if key not in seen:
                 seen.add(key)
                 all_items.append(item)
@@ -6108,7 +6370,14 @@ def _parse_docx_rows(lines, hdr_idx, HEADER_KW):
     prev_name = None
     for i in range(hdr_end + 1, len(lines)):
         line = lines[i].strip()
-        if not line or '|' not in line: continue
+        if not line or '|' not in line:
+            # 章节窗口常常越过表格末尾：下一个真正的章节头（一、/2./（三）…）
+            # 结束本表，而不是把后续章节的表也吞进来。旧的固定标记
+            # `^[三四五六七八九十]、` 只在管道行上生效且挡不住 八、之后
+            # 的编号——这里对非管道行用通用章节头判据收尾。
+            if _is_section_boundary(line):
+                break
+            continue
         if _is_price_summary_row(line): continue
         if any(line.startswith(kw) for kw in ['合计', '总价', '小计', '总计', '注：']): continue
         if re.match(r'^[三四五六七八九十]、', line): break
@@ -6120,6 +6389,18 @@ def _parse_docx_rows(lines, hdr_idx, HEADER_KW):
         if re.match(r'^\s*=', line.strip()):
             continue
         parts = [p.strip() for p in line.split('|')]
+        # ── 外来表头终止 ──
+        # 区域合并会把相邻表缝进同一管道区域：业绩表/资审表的行与本表列对齐
+        # 时（'合同金额'恰好落在'投标单价'的列号上），列级守卫全部放行——
+        # 实测业绩行以'分项'身份混入。表头形态但**价格列位置不同**的行是
+        # 另一张表的开头，本表到此为止（每个候选表头各自解析自己的表）；
+        # 同表的跨页续表头列语义相同，走 continue 不受影响。
+        if _looks_like_header_row(parts, HEADER_ONLY_KW):
+            _foreign_price_cols = {ci for ci, r in enumerate(_infer_column_roles(parts))
+                                   if r in _PRICE_ROLES}
+            if _foreign_price_cols != decl_price_cols:
+                break
+            continue
         name = parts[name_col].strip() if len(parts) > name_col else ''
         # Patterns that indicate a manufacturer/company name rather than a price item
         _MFG_NAME_RE = re.compile(
@@ -6156,7 +6437,13 @@ def _parse_docx_rows(lines, hdr_idx, HEADER_KW):
         # 数字一律不进价格池。两处判据缺一不可 —— 只按形状分，'1200' 无法
         # 与真正的单价区分；只按列分，'class900' 还会混进数量。
         all_nums = []
+        row_seq = None
         for pi, p in enumerate(parts):
+            if pi == seq_col:
+                # 行号证据：序号列的纯数字值（缺行自检用，_validate 剥除）
+                _sq = re.fullmatch(r'(\d{1,4})', p.strip())
+                if _sq and 1 <= int(_sq.group(1)) <= 2000:
+                    row_seq = int(_sq.group(1))
             if pi == name_col or pi in code_cols or _looks_like_code_cell(p):
                 continue
             if _looks_like_identifier_cell(p):
@@ -6324,7 +6611,8 @@ def _parse_docx_rows(lines, hdr_idx, HEADER_KW):
             'unitPrice': unit_price,
             'totalPrice': total_price,
             'totalPriceInTax': total_tax,
-            'extras': {}, 'details': []
+            'extras': {}, 'details': [],
+            '_seq': row_seq,
         }
         # 收行门槛：类别未知的列保留 100 元门槛；明确的投标单价/价格列则只要
         # 有值就收（卡套式终端接头 35.03 元/个 是真实单价，曾被当成噪音丢掉）。
@@ -8433,6 +8721,24 @@ def run_full_analysis(filepaths, ref_filepaths=None, group_map=None, group_texts
                 if len(set(_gaps)) == 1 and _gaps[0] > 0:
                     price_risk_findings.append(
                         f'服务单价呈等差数列（公差{_gaps[0]:g}元/{_unit}），存在规律性差异')
+
+    # ── 分项行数同构校验（跨文件共识）──
+    # 同一标的由招标人给定统一报价格式，各家分项表结构一致、行数相同。某家
+    # 行数明显少于其他家中位数，几乎必然是该份提取不完整（续页丢失/表格
+    # 通道漏检），而不是真少报了行——单文件内看不出来，跨文件一比就现形。
+    # 仅作 warning 提示人工复核，不影响评分与条款判定。
+    _sub_counts = [(gn, len(all_prices.get(gn, {}).get('subItemPrice') or []))
+                   for gn in out_names]
+    _counts_have = sorted(c for _, c in _sub_counts if c > 0)
+    if len(_counts_have) >= 3:
+        _med = _counts_have[len(_counts_have) // 2]
+        if _med >= 6:
+            for gn, c in _sub_counts:
+                if 0 < c < _med * 0.6:
+                    all_prices[gn].setdefault('warnings', []).append(
+                        f'分项报价仅提取 {c} 行，明显少于其他文件中位数 '
+                        f'{_med} 行（同一标的报价表结构通常一致），该文件分项'
+                        f'可能提取不完整，建议人工复核')
 
     # ── Sub-item comparison: compute once, feed strong regularity
     #    findings (identical sub-prices / arithmetic progression /

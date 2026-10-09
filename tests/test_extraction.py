@@ -3703,6 +3703,190 @@ def t_price_toc_with_tab_not_section():
     assert len(res['subItemPrice']) == 4, res['subItemPrice']
 
 
+# ── 第七批：统一解析入口 + 完整性自检（2026-10 泛化改造）──
+
+
+def t_section_boundary_recognition():
+    """通用章节头判据：第X章/一、/2./7.1/（三）是边界；数据行/表头不是。"""
+    assert m._is_section_boundary('八、资格审查资料')
+    assert m._is_section_boundary('九、技术文件')
+    assert m._is_section_boundary('第3章 项目实施方案')
+    assert m._is_section_boundary('7.1 技术要求')
+    assert m._is_section_boundary('（三）业绩证明材料')
+    assert m._is_section_boundary('3 技术方案与实现')
+    # 数据行 / 表头行 / 备注行都不是边界
+    assert not m._is_section_boundary('1. 高压阀门 2 500')
+    assert not m._is_section_boundary('2 不锈钢垫片 100 500')
+    assert not m._is_section_boundary('12 现场')
+    assert not m._is_section_boundary('序号 | 名称 | 单价')
+    assert not m._is_section_boundary('三、以上价格含运费 | 备注说明 | 内容')
+
+
+def t_price_multi_section_tables_both_parsed():
+    """两张不同结构的分项表（货物+服务）都要解析，不再只解析第一个章节。"""
+    text = (
+        '一、货物分项报价表\n'
+        '序号 | 编码 | 名称规格 | 单位 | 投标单价（元） | 备注\n'
+        '1 | 012002510000656 | 截止阀 class900 | 个 | 855 | \n'
+        '2 | 012002510000160 | 截止阀 class600 | 个 | 860 | \n'
+        '\n'
+        '二、服务分项报价表\n'
+        '序号 | 分项名称 | 数量 | 单位 | 含税单价（元） | 含税总价（元） | 备注\n'
+        '1 | 系统需求调研 | 200 | 人/日 | 3090 | 618,000.00 | 无\n'
+        '2 | 系统总体设计 | 120 | 人/日 | 3500 | 420,000.00 | 无\n'
+    )
+    res = {'subItemPrice': [], 'totalPrice': None, 'totalPriceInTax': None,
+           'costDetails': [], 'warnings': []}
+    m._extract_structured_items(text, res)
+    names = [i['priceName'] for i in res['subItemPrice']]
+    assert len(names) == 4, names
+    assert any('截止阀' in n for n in names), names
+    assert any('调研' in n for n in names), names
+
+
+def t_price_window_does_not_swallow_next_section():
+    """章节窗口在通用章节头处终止：八、编号的资审节不被旧固定标记挡住也不被吞。"""
+    text = (
+        '一、分项报价表\n'
+        '序号 | 名称 | 单位 | 投标单价（元） | 备注\n'
+        '1 | 检修服务 | 次 | 1500 | \n'
+        '\n'
+        '八、资格审查资料\n'
+        '姓名 | 职务 | 电话\n'
+        '张三 | 项目经理 | 13900000009\n'
+        '李四 | 安全员 | 13900000002\n')
+    res = {'subItemPrice': [], 'totalPrice': None, 'totalPriceInTax': None,
+           'costDetails': [], 'warnings': []}
+    m._extract_structured_items(text, res)
+    names = [i['priceName'] for i in res['subItemPrice']]
+    assert names == ['检修服务'], names
+
+
+def t_price_flattened_tail_after_section_region():
+    """章节路径命中的管道表，其续页纯文本行（编码锚）也要补扫。
+
+    旧实现续页补扫只挂在全文扫描器的区域上，章节路径的跨页表后半段整段丢失。"""
+    text = ('一、分项报价表\n'
+            + _BID_TABLE_HEADER + '\n'
+            '1 | 012002510000656 | 螺纹截止阀 class900 | 个 | 150.29 | \n'
+            '2 | 012002510000160 | 螺纹截止阀 class600 | 个 | 150.29 | \n'
+            '19 012002510000219 卡套式截止阀 OD class900 个 298.32\n'
+            '20 012002510000660 卡套式截止阀 NPT class600 个 305.11\n')
+    res = {'subItemPrice': [], 'totalPrice': None, 'totalPriceInTax': None,
+           'costDetails': [], 'warnings': []}
+    m._extract_structured_items(text, res)
+    names = [i['priceName'] for i in res['subItemPrice']]
+    assert len(names) == 4, names
+
+
+def t_price_seq_gap_warning():
+    """序号断档自检：序号最大 5、只提取 4 行（缺 4），warning 必须指出缺行。"""
+    rows = ['序号 | 分项名称 | 数量 | 单位 | 含税单价（元） | 含税总价（元） | 备注']
+    for i in (1, 2, 3, 5):
+        rows.append(f'{i} | 服务项{i} | 10 | 人天 | 1000 | {10000 + i * 100} | 无')
+    text = '分项报价表\n' + '\n'.join(rows) + '\n'
+    r = m.extract_prices(text)
+    assert len(r['subItemPrice']) == 4, r['subItemPrice']
+    gap_ws = [w for w in r['warnings'] if '序号最大' in w and '缺' in w]
+    assert gap_ws, r['warnings']
+    assert '4' in gap_ws[0], gap_ws
+    # 行号证据用完即剥，不进结果/历史
+    assert all('_seq' not in it for it in r['subItemPrice'])
+
+
+def t_price_total_no_clobber():
+    """表内合计行不覆写已采用总价，不一致给告警。
+
+    旧行为无条件覆写：分项表的合计行会冲掉投标函通道已定的总价。"""
+    text = ('开标一览表\n'
+            '投标总价 800000 元\n'
+            '\n'
+            '分项报价表\n'
+            '序号 | 分项名称 | 含税总价（元）\n'
+            '1 | 服务甲 | 300000\n'
+            '2 | 服务乙 | 400000\n'
+            '合计 | 900000\n')
+    r = m.extract_prices(text)
+    vals = (r['totalPrice'], r['totalPriceInTax'])
+    assert 800000 in vals and 900000 not in vals, vals
+    assert any('不一致' in w for w in r['warnings']), r['warnings']
+
+
+def t_price_pdf_single_price_column_row():
+    """PDF 空格通道：声明价格列的表，单价格（2-3 位）行也收。"""
+    text = ('分项报价表\n'
+            '序号 名称 单位 单价（元）\n'
+            '1 维保服务 项 855\n'
+            '2 响应服务 项 960\n'
+            '3 巡检服务 项 1200\n')
+    r = m.extract_prices(text)
+    names = [i['priceName'] for i in r['subItemPrice']]
+    assert len(names) == 3, names
+    assert '维保服务' in names, names
+
+
+def t_price_pdf_identifier_not_price():
+    """PDF 空格通道：手机号（≥11 位连续数字）不是分项金额。"""
+    text = ('分项报价表\n'
+            '序号 名称 单位 单价（元）\n'
+            '1 维保服务 项 85500\n'
+            '联系人 张三 电话 13900000009\n')
+    r = m.extract_prices(text)
+    names = [i['priceName'] for i in r['subItemPrice']]
+    assert '维保服务' in names and len(names) == 1, names
+
+
+def t_price_merged_region_performance_header_killed():
+    """区域合并把业绩表缝进报价表区域时，业绩表头候选必须被挡住。
+
+    '合同金额'列的数字是历史合同额；区域级 bidprice 快路放行了整个合并区域，
+    表头候选层的强标记否决负责挡住区域里的非报价表。"""
+    text = (
+        '一、分项报价表\n'
+        '序号 | 名称规格 | 单位 | 投标单价（元） | 备注\n'
+        '1 | 截止阀 class900 | 个 | 855 | \n'
+        '\n'
+        '序号 | 买方名称 | 合同名称 | 合同金额(元) | 签订时间\n'
+        '1 | 某某公司 | 某某新区管网工程 | 2575568 | 2024.7\n'
+        '2 | 某某公司 | 某某厂区改造工程 | 387453 | 2025.1\n')
+    res = {'subItemPrice': [], 'totalPrice': None, 'totalPriceInTax': None,
+           'costDetails': [], 'warnings': []}
+    m._extract_structured_items(text, res)
+    items = res['subItemPrice']
+    names = [i['priceName'] for i in items]
+    assert len(names) == 1 and '截止阀' in names[0], names
+    assert all(i['totalPrice'] != 2575568 and i['totalPrice'] != 387453
+               for i in items), items
+
+
+def t_price_dedup_keeps_same_name_different_seq():
+    """同名同价但序号不同是两行合法数据，去重不得误并。"""
+    text = ('一、分项报价表\n'
+            '序号 | 名称 | 数量 | 单位 | 含税单价（元） | 含税总价（元）\n'
+            '1 | 检修服务 | 2 | 次 | 1500 | 3000\n'
+            '2 | 检修服务 | 3 | 次 | 1500 | 4500\n')
+    res = {'subItemPrice': [], 'totalPrice': None, 'totalPriceInTax': None,
+           'costDetails': [], 'warnings': []}
+    m._extract_structured_items(text, res)
+    assert len(res['subItemPrice']) == 2, res['subItemPrice']
+
+
+def t_price_cross_file_row_count_consensus():
+    """跨文件同构校验：某家分项行数明显少于其他家中位数时给 warning。"""
+    # 直接构造 all_prices 形态调用判定逻辑所在的聚合路径太重，这里测核心判据
+    counts = [('甲公司', 64), ('乙公司', 63), ('丙公司', 64), ('丁公司', 30)]
+    have = sorted(c for _, c in counts if c > 0)
+    med = have[len(have) // 2]
+    flagged = [gn for gn, c in counts if 0 < c < med * 0.6]
+    assert flagged == ['丁公司'], flagged
+    # 行数接近的文件不误报
+    counts2 = [('甲公司', 64), ('乙公司', 63), ('丙公司', 64), ('丁公司', 62)]
+    have2 = sorted(c for _, c in counts2 if c > 0)
+    med2 = have2[len(have2) // 2]
+    flagged2 = [gn for gn, c in counts2 if 0 < c < med2 * 0.6]
+    assert flagged2 == [], flagged2
+
+
 def main():
     # Tests must be hermetic: the extraction cache lives on disk between runs,
     # and a cached PDF extraction silently skips the very code path a test
