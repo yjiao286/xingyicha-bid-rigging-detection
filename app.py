@@ -776,6 +776,45 @@ def _extract_kso_metadata(z):
 
 
 # ── Text Extraction ─────────────────────────────────────────────
+def _extract_docx_xml_fallback(filepath):
+    """Read word/document.xml directly when python-docx rejects the package.
+
+    Real-world failures this rescues (measured on the catering corpus): zip
+    packages whose rels point at a NULL entry ('There is no item named NULL')
+    and .docm macro documents (content-type macroEnabled) — python-docx
+    raises on both, and the worker fallback would leave an empty text, which
+    is what actually emptied 4 of 12 bids' every dimension. Text-only:
+    embedded-image OCR stays on the python-docx path."""
+    import zipfile
+    from lxml import etree
+    W = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
+    try:
+        with zipfile.ZipFile(filepath) as zf:
+            xml = zf.read('word/document.xml')
+        root = etree.fromstring(xml)
+    except Exception:
+        return None
+    body = root.find(W + 'body')
+    if body is None:
+        return None
+
+    def para_text(p):
+        return ''.join(t.text or '' for t in p.iter(W + 't'))
+
+    lines = []
+    for child in body:
+        if child.tag == W + 'p':
+            lines.append(para_text(child))
+        elif child.tag == W + 'tbl':
+            for tr in child.iter(W + 'tr'):
+                cells = [' '.join(para_text(p) for p in tc.iter(W + 'p')).strip()
+                         for tc in tr.findall(W + 'tc')]
+                if any(cells):
+                    lines.append(' | '.join(cells))
+    text = '\n'.join(lines)
+    return text if text.strip() else None
+
+
 def _read_text_file(filepath):
     """Read a plain .txt file with encoding auto-detection.
 
@@ -1858,7 +1897,19 @@ def _extract_text_uncached(filepath, max_pages=MAX_PDF_PAGES, on_progress=None,
                                           cancel_event=cancel_event)
         return '', []
 
-    doc = Document(filepath)
+    try:
+        doc = Document(filepath)
+    except Exception as e:
+        # 损坏包（zip rels 指向 NULL 条目 / .docm 宏文档 content-type）先走
+        # XML 直读回退：document.xml 通常完好，空文本才是真正的数据丢失。
+        fb = _extract_docx_xml_fallback(filepath)
+        if fb:
+            logger.info('docx 标准解析失败，已用 XML 直读回退提取 "%s"（%s）',
+                        os.path.basename(filepath), e)
+            return fb, []
+        logger.warning('docx 解析失败且 XML 回退无效 "%s": %s',
+                       os.path.basename(filepath), e)
+        return '', []
     lines = []
     # Paragraphs and tables must be emitted in DOCUMENT ORDER. Walking
     # doc.paragraphs and then doc.tables puts every table after every
@@ -3520,6 +3571,33 @@ def _is_yyyymmdd(v):
     return 1990 <= y <= 2099 and 1 <= mo <= 12 and 1 <= d <= 31
 
 
+def _is_bare_year_value(value, raw, context):
+    """True when the number is a bare 4-digit YEAR (2024/2025…), not money.
+
+    Integer, 1900-2100, no decimal/thousands separator/currency marker on the
+    raw token, and the surrounding context carries a date signal (年/月/
+    服务期/周期/期限/日期/截止). Catering/service bids carry bare years in
+    服务期/年份 table columns with no '年' suffix — they were being read as
+    amounts wholesale: sub-item sums reached 1.6e17 and the comparison layer
+    built 'identical quote' findings out of 2024/2025/2026 元."""
+    if value is None:
+        return False
+    if value != int(value):
+        # '2024.1' / '2026.3' —— 业绩表合同期（2024年1月）切出来的小数，
+        # 整数部分是年份且小数部分 <=12 即年.月，曾以"分项价格"身份混入。
+        ip, fp = divmod(value, 1)
+        if not (1900 <= ip <= 2100 and 0 < fp * 10 <= 12.5):
+            return False
+        if isinstance(raw, str) and (',' in raw or '元' in raw or '￥' in raw):
+            return False
+        return bool(re.search(r'年|月|服务期|周期|期限|日期|截止|生效', context or ''))
+    if not (1900 <= value <= 2100):
+        return False
+    if isinstance(raw, str) and re.search(r'[.,，]|元|￥|¥', raw):
+        return False
+    return bool(re.search(r'年|月|服务期|周期|期限|日期|截止|生效', context or ''))
+
+
 def _fw_digits_to_ascii(s):
     """Translate full-width digits (０-９), ：，％＠ to ASCII in a text copy.
 
@@ -3541,6 +3619,74 @@ def _ocr_digit_normalize(s):
     s = re.sub(r'(?<=\d)[OoQ](?=\d)', '0', s)
     s = re.sub(r'(?<=\d)[lI|](?=\d)', '1', s)
     return s
+
+
+# 服务类单价报价单位：餐饮/物业/安保等按人头/次数计价（元/人/天 15.23 是
+# 评标核心价）。单位里 '/' 与 '·' 的空白/全角变体都归一匹配。
+_UNIT_PRICE_UNIT_RE = re.compile(
+    r'元\s*[/／]\s*(?:人\s*[/／]\s*(?:天|日|月|次|餐)|人\s*[·•]\s*月|'
+    r'人月|人次|人餐|人|次|餐|日|天|月)')
+# 不含'餐标'：'早餐15元/人、午餐25元/人'是甲方指定餐标/餐标说明，
+# 不是投标人的服务报价——残留会把甲方的餐标读成 15 元/人/天。
+_UNIT_PRICE_LABEL_RE = re.compile(r'(?:总价|单价|报价|服务费|费用)')
+
+
+def _extract_service_unit_price(search_text, result):
+    """Service unit-price quote (元/人/天 …) → bidRate.
+
+    Catering/service bids quote per-person rates instead of 万元 totals:
+    the quote row is literally '（元/人/天）| 服务费用总价（元/人/天）| 15.23'
+    (pipe cell layout — label and value in separate cells), with the 大写
+    '壹拾伍元贰角叁分' nearby. Every amount channel misses this shape (the
+    大写 anchor of channel 0b requires >= 50000), so the whole pricing
+    dimension used to come out empty. The unit price IS the evaluated price
+    here — extract it with its unit so the comparison layer can cluster."""
+    if not search_text or result.get('bidRate'):
+        return
+    lines = search_text.split('\n')
+    for i, ln in enumerate(lines):
+        if not _UNIT_PRICE_UNIT_RE.search(ln):
+            continue
+        # 只认报价标签佐证的单价行：营养/热量表也可能用 元/人/天 计量
+        if not _UNIT_PRICE_LABEL_RE.search(ln):
+            continue
+        window = '\n'.join(lines[i:i + 4])
+        # 大写互验优先：'大写：壹拾肆元玖角肆分'（=14.94）。字符类必须
+        # 含 元/角/分 ——首版正则在'元'处截断，14 vs 14.94 互验永远失败。
+        cn_val = None
+        cn_m = re.search(r'大写\s*[：:]?\s*'
+                         r'([壹贰叁肆伍陆柒捌玖拾佰仟万亿零元圆角分整正]{2,24})',
+                         window)
+        if cn_m:
+            cv = _cn_to_number(cn_m.group(1))
+            if cv and 0.5 <= cv <= 99999:
+                cn_val = cv
+        # 候选采集：排除 '=1+2+3' 公式、年份与 '（ 6 ）%' 税率
+        cands = []      # (value, raw) —— raw 保留原文形态供小数判定
+        for mm in re.finditer(
+                r'(?<![=＝\d.])(\d{1,5}(?:\.\d{1,2})?)(?![\d]|\s*[）)]?\s*%)', window):
+            v = float(mm.group(1))
+            if 0.5 <= v <= 9999 and v not in (100.0, 1000.0) \
+                    and not _is_bare_year_value(v, mm.group(1), window):
+                cands.append((v, mm.group(1)))
+        if not cands:
+            continue
+        if cn_val is not None:
+            match = [v for v, _ in cands if abs(v - cn_val) < 0.011]
+            if not match:
+                continue
+            value = cn_val
+        else:
+            # 无大写佐证：带小数点的候选优先（单价几乎总带角分：15.23/
+            # 15.00）；同行的序号/条款号都是纯整数。必须按原文是否含 '.'
+            # 判定——'15.0' 是整数值浮点（15.0 == 15），按数值判会被当成
+            # 整数排除，fallback 到 min 后选中 '（ 6 ）%' 的 6。
+            dec = [v for v, raw in cands if '.' in raw]
+            value = min(dec) if dec else min(v for v, _ in cands)
+        unit_txt = _UNIT_PRICE_UNIT_RE.search(ln).group(0)
+        unit_txt = re.sub(r'\s+', '', unit_txt)
+        result['bidRate'] = f'{value:g}{unit_txt}'
+        return
 
 
 def extract_prices(text):
@@ -3625,7 +3771,8 @@ def extract_prices(text):
                     cn_vals.append(cnv)
                 elif not cnv:
                     arv = _parse_amount(cell)
-                    if arv >= 50000 and not _is_yyyymmdd(arv):
+                    if arv >= 50000 and not _is_yyyymmdd(arv) \
+                            and not _is_bare_year_value(arv, None, line):
                         ar_vals.append(arv)
             if not cn_vals:
                 continue
@@ -4028,6 +4175,19 @@ def extract_prices(text):
                     result['bidRate'] = m.group(1) + '‰'
                 break
 
+    # ── Service unit-price quotes (元/人/天 …) ──
+    # 费率通道之上（费率形态优先），税率提取之前——税率的前置条件是"已有
+    # 任意价格形态"，单价标书在这里定下 bidRate 后 '（ 6 ）%' 才有人认领。
+    if result.get('bidRate') is None:
+        _extract_service_unit_price(bid_section if bid_section else text, result)
+
+    # ── Tax rate：单价类标书的二次认领 ──
+    # 上方（总额通道之后）的税率提取跑在单价通道之前——纯单价标书那时还
+    # 没有任何价格形态，前置条件不满足；这里在 bidRate 定下后补跑一次。
+    # 函数幂等：只在 taxRate 仍为 None 时填充。
+    if result.get('taxRate') is None:
+        _extract_tax_decomposition(text, bid_section if bid_section else text, result)
+
     # ── Always try to extract subItemPrice and costDetails ──
     _extract_structured_items(text, result)
 
@@ -4088,13 +4248,28 @@ def _find_bid_summary_section(text):
             # summary table shows a price signal within ~400 chars of its header
             # (小写：/大写：/￥/CN-numeral amounts/5+ digit numbers).
             if not re.search(r'(?:小写|大写)\s*[：:]|￥|¥|\d{5,}|\d[，,]\d{3}|'
-                             r'[壹贰叁肆伍陆柒捌玖][佰仟万亿]', text[idx:idx + 400]):
+                             r'[壹贰叁肆伍陆柒捌玖][佰仟万亿]|'
+                             # 服务类单价报价（'服务费用总价（元/人/天）'）里的
+                             # 数值是 15.23 这类小数，上面几个信号一个都不沾
+                             r'元\s*[/／]\s*(?:人|次|餐|月|天|日)', text[idx:idx + 400]):
                 idx = text.find(kw, idx + 1)
                 continue
 
             # Skip inline list items like "（2）开标一览表；" or "1）开标一览表；"
             # These are bid-letter content listings, not actual section headers.
             if re.search(r'[（(]\d+[）)]\s*$', line_prefix):
+                idx = text.find(kw, idx + 1)
+                continue
+
+            # Skip TOC entries whose line ends with a page number
+            # ('开标一览表20' / '分项报价表21'): dot leaders are not always
+            # present, and the 400-char price-signal guard below can be
+            # satisfied by digits in neighbouring TOC lines — measured on the
+            # catering corpus where the TOC line was accepted as the section
+            # and every price channel then searched a 3000-char TOC window.
+            _le = text.find('\n', idx)
+            _tail = text[idx + len(kw):_le if _le > idx else idx + 40]
+            if re.search(r'\d', _tail) and re.fullmatch(r'[\s\d\-–—~、.．·]*', _tail):
                 idx = text.find(kw, idx + 1)
                 continue
             # Also skip when the keyword is followed by "；" or "。" (still in a list)
@@ -4120,7 +4295,10 @@ def _find_bid_summary_section(text):
                re.search(_CN_AMT + r'\s*元', section) or \
                re.search(r'[\d,]+\.?\d*\s*万', section) or \
                re.search(r'\d{1,3}(?: \d{3})+', section) or \
-               re.search(r'(?<!\d)[\d,]{5,}(?![\d,])', section):
+               re.search(r'(?<!\d)[\d,]{5,}(?![\d,])', section) or \
+               (  # 服务类单价报价章节：数值是 15.23 这类小数，须单独放宽
+                re.search(r'元\s*[/／]\s*(?:人|次|餐|月|天|日)', section)
+                and re.search(r'(?<!\d)\d{1,4}\.\d{1,2}(?!\d)', section)):
                 return section
 
             # Otherwise, skip this occurrence and try next
@@ -4194,9 +4372,17 @@ def _extract_tax_decomposition(text, section, result):
             m = re.search(rf'{re.escape(str(price_val))}[\s\S]{{0,100}}?(\d{{1,2}})\s*(?:增值税|专用|普通|发票)', section)
             if m and 1 <= int(m.group(1)) <= 30:
                 result['taxRate'] = m.group(1) + '%'
-    if result.get('taxRate') is None and (result.get('totalPrice') or result.get('totalPriceInTax')):
+    # 服务类标书只有单价（bidRate）没有总价——税率提取以"已有任意价格
+    # 形态"为前提即可，否则 '（ 6 ）%' 永远无人认领。
+    if result.get('taxRate') is None and (result.get('totalPrice')
+                                          or result.get('totalPriceInTax')
+                                          or result.get('bidRate')):
         # Pattern C: standalone "6 %" or "6%" in table cell
         m = re.search(r'(?<!\d)(\d{1,2})\s*[%％](?!\d)', section)
+        # Pattern D: '（ 6 ）%' — service-bid tables wrap the rate in full
+        # parens with the % outside ('（ 6 ）%'), which \s*% cannot match.
+        if not m:
+            m = re.search(r'[（(]\s*(\d{1,2})\s*[）)]\s*[%％]', section)
         if m and 1 <= int(m.group(1)) <= 30:
             result['taxRate'] = m.group(1) + '%'
 
@@ -4223,9 +4409,14 @@ def _extract_structured_items(text, result):
         kw_pattern + r')[^\n]*\n', text
     ):
         pos = m.start()
-        # Skip if preceded by dots (TOC entry)
+        # Skip TOC entries: dotted leaders OR trailing page numbers /
+        # P-ranges ('第三章 分项报价表 P177-192' — the catering corpus TOC
+        # uses page numbers without dots, and the section finder used to
+        # accept the TOC line as the 分项报价表 heading itself).
         prefix = text[max(0, pos - 30):pos]
-        if re.search(r'\.{3,}', prefix):
+        toc_line = text[pos:text.find('\n', pos) if text.find('\n', pos) > pos else pos + 80]
+        if re.search(r'\.{3,}', prefix) or re.search(r'P\d+\s*[-–—~]\s*\d+', toc_line) \
+                or re.search(r'[\t ]\d{1,4}\s*$', toc_line):
             continue
         # Find next major section boundary
         next_pos = len(text)
@@ -4411,6 +4602,20 @@ def _extract_structured_items(text, result):
 def _validate_price_extraction(text, result, bid_section):
     """Post-extraction sanity checks. Clears values that fail validation to prevent
     showing garbage data (e.g. project history amounts) as bid prices."""
+    # ── 幻影总价先行清除：单价形态标书 + 全文兜底 = 噪音 ──
+    # 实测（餐饮语料）：15万保证金、550万历史采购合同、775万12个月发票合计
+    # 都被全文兜底当成"总价"。单价才是这类标书的比价基准，先清幻影总价，
+    # 后续验证链才不会围绕错值生成信号。必须放在本函数最前——写在末尾时
+    # 被"值不在原文中"等早退路径绕过。
+    if result.get('bidRate') and '元/' in result['bidRate'] \
+            and result.get('_from_global'):
+        _phantom = result.get('totalPriceInTax') or result.get('totalPrice')
+        if _phantom:
+            result['totalPriceInTax'] = None
+            result['totalPrice'] = None
+            result['warnings'].append(
+                f'全文兜底匹配到的"总价"{_phantom:,.0f} 与服务单价报价形态冲突'
+                f'（疑似保证金/合同额/发票合计），已忽略')
     tp = result.get('totalPrice')
     tpit = result.get('totalPriceInTax')
     tax_str = result.get('taxRate')
@@ -4513,8 +4718,10 @@ def _validate_price_extraction(text, result, bid_section):
             result['totalPriceInTax'] = None
         if tp is not None and tp < 5000:
             result['totalPrice'] = None
-        # If both prices were cleared, tax rate alone is meaningless
-        if result['totalPrice'] is None and result['totalPriceInTax'] is None:
+        # If both prices were cleared, tax rate alone is meaningless —
+        # except for unit-price service bids, where bidRate is the price.
+        if result['totalPrice'] is None and result['totalPriceInTax'] is None \
+                and result.get('bidRate') is None:
             result['taxRate'] = None
 
         # Prices sourced purely from Chinese numerals — or scaled by a paren
@@ -4934,19 +5141,23 @@ def _scan_docx_tables_for_pricing(text, result):
     # Score each region for pricing relevance
     PRICE_COL_KW = ['单价', '总价', '税率', '金额', '价格', '报价', '不含税', '含税']
     NON_PRICE_KW = ['出差事由', '合同金额', '项目名称', '职务', '岗位', '职称',
-                    '联系人', '联系电话', '项目经理', '指标要求', '功能要求']
+                    '联系人', '联系电话', '项目经理', '指标要求', '功能要求',
+                    '注册资金', '注册资本', '邮政编码', '银行账号', '开户行',
+                    '信用代码', '成立日期', '经营范围', '资质等级', '营业执照']
     scored = []
     for start, end in regions:
         region_text = '\n'.join(lines[start:end])
         score = 0
-        # Bonus for pricing column headers
-        for kw in PRICE_COL_KW:
-            if kw in region_text:
-                score += 3
-        # Penalty for non-price table keywords
-        for kw in NON_PRICE_KW:
-            if kw in region_text:
-                score -= 2
+        # Penalty FIRST: '合同金额' contains '金额', so a project-history
+        # table scored net +1 (3-2) and its 2024.1 contract dates were read
+        # as sub-item prices. A non-price keyword kill outweighs any bonus.
+        non_price_hits = sum(1 for kw in NON_PRICE_KW if kw in region_text)
+        # Bonus for pricing column headers (skipped when killed)
+        if non_price_hits == 0:
+            for kw in PRICE_COL_KW:
+                if kw in region_text:
+                    score += 3
+        score -= 2 * non_price_hits
         # Bonus for having rows with large numbers (>= 10000)
         large_count = len(re.findall(r'\b\d{5,}(?:\.\d{2})?\b', region_text))
         score += min(large_count, 10)
@@ -5045,6 +5256,12 @@ def _parse_docx_rows(lines, hdr_idx, HEADER_KW):
         if any(line.startswith(kw) for kw in ['合计', '总价', '小计', '总计', '注：']): continue
         if re.match(r'^[三四五六七八九十]、', line): break
 
+        # 目录行与公式行：'第三章 分项报价表 | P177-192'（页码区间当分项名）
+        # 与 '=1+2+3' 合计公式行都不是报价数据行。
+        if re.search(r'P\d+\s*[-–—~]\s*\d+', line) or re.search(r'[.．…]{3,}', line):
+            continue
+        if re.match(r'^\s*=', line.strip()):
+            continue
         parts = [p.strip() for p in line.split('|')]
         name = parts[name_col].strip() if len(parts) > name_col else ''
         # Patterns that indicate a manufacturer/company name rather than a price item
@@ -5094,14 +5311,19 @@ def _parse_docx_rows(lines, hdr_idx, HEADER_KW):
             # Skip spec-related numbers (resolution, IP ratings, etc.) unless marked with 元
             is_spec = bool(_SPEC_PAT.search(p))
             has_yuan = '元' in p
+            # 面积/人次/重量等物理量不是钱：采购需求表的 '1738平方米'、
+            # '约500人次' 曾作为分项价格累加（分项合计到百万亿）。
+            is_qty = bool(re.search(r'平方米|平米|㎡|m2|人次|人数|面积|'
+                                    r'万?份|万?kg|吨|公里|km', p)) and not has_yuan
             is_pure_num = re.match(r'^\s*[\d,]+\.?\d*\s*(?:元)?\s*$', p) is not None
 
-            if is_spec and not has_yuan:
-                # Spec numbers: classify as count if small, ignore otherwise
+            if (is_spec or is_qty) and not has_yuan:
+                # Spec/quantity numbers: classify as count if small, ignore otherwise
                 if v < 1000 and v == int(v):
                     all_nums.append(('count', v, pi))
                 # else: ignore (false price from spec text)
-            elif v >= 100 or has_yuan:
+            elif (v >= 100 or has_yuan) \
+                    and not _is_bare_year_value(v, nm.group(1), line):
                 all_nums.append(('price', v, pi))
             else:
                 all_nums.append(('count', v, pi))
@@ -5161,11 +5383,27 @@ def _filter_price_items(items):
         r'.{0,5}(?:中国|日本|美国|德国|英国|法国|意大利|加拿大|澳大利亚|'
         r'马来西亚|新加坡|韩国|越南|印度|泰国|台湾|香港|澳门|'
         r'北京|上海|深圳|广州|成都|武汉|南京|杭州|西安)))')
+    # 页码区间（P177-192）与整段合同正文（'甲方委托乙方在810工作区食堂…'
+    # 60+ 字条款）都不是分项名：前者来自目录行，后者来自采购需求描述段。
+    PAGE_RANGE_RE = re.compile(r'^P?\d{1,4}\s*[-–—~]\s*\d{1,4}$')
+    CLAUSE_RE = re.compile(r'甲方|乙方|委托|面积|人次|就餐|用餐')
+    # 资质审查表字段（注册资金/邮编/银行账号列）与地址行曾被当成分项：
+    # 营业执照信息表本身就有数字列，表扫描评分压不住。
+    CRED_RE = re.compile(r'注册资[本金]|邮政编码|邮编|银行账号|账号|开户行|'
+                         r'营业执照|信用代码|成立日期|经营范围|资质|授权代表|'
+                         r'^万元|^人民币|大写|小写')
+    ADDR_RE = re.compile(r'(?:省|市|区|县|镇).{0,24}(?:路|街|巷|道).{0,8}(?:号|号院|$)')
     valid = []
     for item in items:
-        if BAD.search(item.get('priceName', '')): continue
+        name_t = item.get('priceName', '')
+        if BAD.search(name_t): continue
+        if PAGE_RANGE_RE.match(name_t): continue
+        if CRED_RE.search(name_t) or ADDR_RE.search(name_t): continue
+        if len(name_t) > 50 or (len(name_t) > 20 and CLAUSE_RE.search(name_t)): continue
         up = item.get('unitPrice') or 0
         tp = item.get('totalPrice') or 1
+        # 银行账号/信用代码（15-19 位）不是金额
+        if up > 1e12 or tp > 1e12: continue
         if up > tp * 1.5: continue
         valid.append(item)
     return valid
@@ -5244,6 +5482,9 @@ def find_common_segments(text1, text2, min_len=15):
     # grams; real bid prose rarely repeats a 15-gram more than a few dozen
     # times, so this cap is almost never reached.
     MAX_CANDS = 96
+    # 双向延伸的分块比较粒度（切片相等由 C 层 memcmp 完成，逐字符 Python
+    # 循环在重复行文上会放大成分钟级——见下方延伸循环注释）。
+    _EXT_CHUNK = 64
 
     i2 = 0
     while i2 <= L2 - k:
@@ -5264,15 +5505,28 @@ def find_common_segments(text1, text2, min_len=15):
             checked += 1
             if claimed1[i1]:
                 continue
-            # Extend forward while normalised chars match.
+            # Extend forward while normalised chars match. Chunked compare
+            # (_EXT_CHUNK-char slice equality runs in C): on repetitive
+            # documents the per-char Python loop WAS the algorithm — measured
+            # 98s for one 投标人A×投标人B pair (357K × 1.0M chars, 193 matches with
+            # extensions up to thousands of chars) with this loop at the top
+            # of the profile; chunked comparison is identical in result.
             f = 0
-            while (i1 + k + f < L1 and i2 + k + f < L2
-                   and norm1[i1 + k + f] == norm2[i2 + k + f]):
+            fmax = L1 - i1 - k if L1 - i1 - k < L2 - i2 - k else L2 - i2 - k
+            while (f + _EXT_CHUNK <= fmax
+                   and norm1[i1 + k + f:i1 + k + f + _EXT_CHUNK]
+                   == norm2[i2 + k + f:i2 + k + f + _EXT_CHUNK]):
+                f += _EXT_CHUNK
+            while f < fmax and norm1[i1 + k + f] == norm2[i2 + k + f]:
                 f += 1
-            # Extend backward while normalised chars match.
+            # Extend backward while normalised chars match (same chunking).
             b = 0
-            while (i1 - b - 1 >= 0 and i2 - b - 1 >= 0
-                   and norm1[i1 - b - 1] == norm2[i2 - b - 1]):
+            bmax = i1 if i1 < i2 else i2
+            while (b + _EXT_CHUNK <= bmax
+                   and norm1[i1 - b - _EXT_CHUNK:i1 - b]
+                   == norm2[i2 - b - _EXT_CHUNK:i2 - b]):
+                b += _EXT_CHUNK
+            while b < bmax and norm1[i1 - b - 1] == norm2[i2 - b - 1]:
                 b += 1
             total = k + f + b
             if total > best_len:
@@ -5419,7 +5673,10 @@ def _is_standard_listing(text):
         if is_cert_no or cov / (b - a) >= 0.6:
             register += 1
     if (register / len(tokens) >= _STD_LISTING_RATIO
-            and sum(covered) >= 8):
+            and (sum(covered) >= 8 or cert_nos >= 1)):
+        # 纯登记号片段（'（2025-N1OHSMS-6014'）：两家标书审核员注册号前段
+        # 相同、尾段不同，切出的公共段是裸号码——不含认证词汇、也不进
+        # 覆盖位图，只有"含登记号 token"这一条能命中。
         return True
     if cert_nos >= _STD_CERT_NO_MIN:
         hints = sum(t.count(w) for w in _STD_CERT_HINT_WORDS)
@@ -5811,7 +6068,8 @@ def _split_paragraphs(text):
     return out
 
 
-def _find_near_duplicate_paragraphs(text1, text2, min_ratio=0.80, max_ratio=0.98):
+def _find_near_duplicate_paragraphs(text1, text2, min_ratio=0.80, max_ratio=0.98,
+                                    paras1=None, paras2=None):
     """Find paragraph pairs that are near-duplicates (high but not exact
     similarity) across two texts.
 
@@ -5823,10 +6081,18 @@ def _find_near_duplicate_paragraphs(text1, text2, min_ratio=0.80, max_ratio=0.98
     (longest first), blocked by length bucket, then cheap quick_ratio()
     pre-filters before the full ratio() confirmation. Returns list of
     {seg1, seg2, ratio}.
+
+    paras1/paras2 may carry precomputed _split_paragraphs output: the pair
+    loop of text_similarity_analysis builds each document's list 11 times
+    (once per pair) and per-line work — normalize + is_template_content
+    (which normalizes again inside _is_standard_listing) — measured 37s of
+    an 82s stage. Pure data, no swap logic: safe to hoist.
     """
     import difflib
-    paras1 = _split_paragraphs(text1)
-    paras2 = _split_paragraphs(text2)
+    if paras1 is None:
+        paras1 = _split_paragraphs(text1)
+    if paras2 is None:
+        paras2 = _split_paragraphs(text2)
     if not paras1 or not paras2:
         return []
     # Keep the 120 longest substantial paragraphs per file.
@@ -5938,6 +6204,16 @@ def text_similarity_analysis(texts_dict, ref_texts_list=None, on_progress=None,
             ref_ngrams = _build_ref_ngram_index(ref_texts_norm)
         return (_reference_derived_ratio(_normalize_for_match(seg_text),
                                         ref_ngrams) >= _REF_DERIVED_RATIO)
+
+    # Per-document paragraph lists, built once and reused across pairs (see
+    # the note in _find_near_duplicate_paragraphs): 11 rebuilds per document
+    # measured 37s of an 82s similarity stage on the 12-document corpus.
+    _paras_memo = {}
+
+    def _paras(name):
+        if name not in _paras_memo:
+            _paras_memo[name] = _split_paragraphs(texts_dict[name])
+        return _paras_memo[name]
 
     total_pairs = len(filenames) * (len(filenames) - 1) // 2
     pair_idx = 0
@@ -6143,7 +6419,8 @@ def text_similarity_analysis(texts_dict, ref_texts_list=None, on_progress=None,
             # SequenceMatcher blocks above. Reported as substantial
             # evidence (feeds clause 4-a via substantial_abnormal).
             nd_idx = len(segments)
-            for nd in _find_near_duplicate_paragraphs(t1, t2):
+            for nd in _find_near_duplicate_paragraphs(
+                    t1, t2, paras1=_paras(filenames[i]), paras2=_paras(filenames[j])):
                 nd_idx += 1
                 nd_seg1 = nd['seg1']
                 nd_seg2 = nd['seg2']
@@ -7119,7 +7396,11 @@ def run_full_analysis(filepaths, ref_filepaths=None, group_map=None, group_texts
                     f'各家总价呈等差数列（公差{_gaps[0]:,.0f}元，{_detail}），存在规律性差异')
 
         for gn, prices in all_prices.items():
-            has_total = prices.get('totalPrice') is not None or prices.get('totalPriceInTax') is not None
+            # 服务单价报价也是"有报价"——口径漏掉 bidRate 时的形态是：
+            # 报价表列全对（单价+税率），findings 却说"未提取到任何报价"。
+            has_total = (prices.get('totalPrice') is not None
+                         or prices.get('totalPriceInTax') is not None
+                         or prices.get('bidRate') is not None)
             has_details = prices.get('costDetails') or prices.get('subItemPrice')
             if not has_total and not has_details:
                 price_no_data_findings.append(f'{gn}未提取到任何报价/成本信息')
@@ -7127,6 +7408,41 @@ def run_full_analysis(filepaths, ref_filepaths=None, group_map=None, group_texts
                 price_no_data_findings.append(f'{gn}仅提取到成本明细，未提取到总价')
 
     _progress('pricing', '报价分析', 92, f'比较含税总价、不含税总价、分项单价等')
+
+    # ── Service unit-price comparison (元/人/天 …) ──
+    # 餐饮/物业等服务类标书按人头单价计价，总价通道往往全空——单价才是
+    # 评标与围串标比对的基准。同单价单位下：完全一致 → 可疑；差异 <2% →
+    # 高度接近；≥3 家等差 → 规律性差异。
+    _unit_quotes = {}
+    for gn, prices in all_prices.items():
+        br = prices.get('bidRate') or ''
+        um = re.match(r'^([\d.]+)元/(.+)$', br)
+        if um:
+            try:
+                _uv = float(um.group(1))
+            except ValueError:
+                continue
+            if 0 < _uv <= 99999:
+                _unit_quotes.setdefault(um.group(2), []).append((gn, _uv))
+    for _unit, _lst in _unit_quotes.items():
+        if len(_lst) < 2:
+            continue
+        _vals = [v for _, v in _lst]
+        _detail = ' | '.join(f'{gn}: {v:g}' for gn, v in _lst)
+        if len(set(_vals)) == 1:
+            price_risk_findings.append(
+                f'{len(_vals)}家供应商服务单价完全一致({_vals[0]:g}元/{_unit})，可疑')
+        else:
+            _spread = (max(_vals) - min(_vals)) / max(_vals) * 100
+            if _spread < 2:
+                price_risk_findings.append(
+                    f'服务单价差异仅{_spread:.1f}%（{_detail}元/{_unit}），高度接近')
+            elif len(_vals) >= 3:
+                _sv = sorted(_vals)
+                _gaps = [_sv[i + 1] - _sv[i] for i in range(len(_sv) - 1)]
+                if len(set(_gaps)) == 1 and _gaps[0] > 0:
+                    price_risk_findings.append(
+                        f'服务单价呈等差数列（公差{_gaps[0]:g}元/{_unit}），存在规律性差异')
 
     # ── Sub-item comparison: compute once, feed strong regularity
     #    findings (identical sub-prices / arithmetic progression /

@@ -2270,6 +2270,158 @@ def t_std_listing_keeps_mixed_paragraph_abnormal():
     assert pr['matches'][0]['risk_level'] != 'template'
 
 
+def t_service_unit_price_extraction():
+    # 服务类单价报价（餐饮/物业按人头计价）：'服务费用总价（元/人/天）'
+    # 表头 + 值行 '15.23'（或大写 '壹拾肆元玖角肆分' = 14.94）→ bidRate。
+    # 首版缺陷：大写正则不含 元/角/分，'壹拾肆元' 在'元'处截断（14 vs
+    # 14.94 互验失败）；'=1+2+3' 公式里的 1 曾被当成单价。
+    t1 = ('投标人名称 | 服务费用总价（含税）元/人/天 | 增值税税率 | 备注\n'
+          '北京甲公司 | 大写：壹拾肆元玖角肆分  小写：14.94元/人/天 | （ 6 ）% | 无\n'
+          '重庆 | 服务费用总价（元/人/天） | 14.94 | / | =1+2+3')
+    r = m.extract_prices(t1)
+    assert r['bidRate'] == '14.94元/人/天', r['bidRate']
+
+    t2 = '（元/人/天） | 服务费用总价\n（元/人/天） | 15.23 |  | =1+2+3'
+    r2 = m.extract_prices(t2)
+    assert r2['bidRate'] == '15.23元/人/天', r2['bidRate']
+
+    # 甲方餐标说明不是投标人报价（'餐标' 已从标签中移除）
+    t3 = '严格执行：早餐15元/人、午餐25元/人、晚餐20元/人固定餐标，不降标。'
+    r3 = m.extract_prices(t3)
+    assert r3['bidRate'] is None, r3['bidRate']
+
+    # '（ 6 ）%' 括号税率形态（服务类标书普遍写法）
+    assert m.extract_prices(t1)['taxRate'] == '6%'
+
+
+def t_unit_price_dot_priority_and_tax_exclusion():
+    # '（ 6 ）%' 的 6 不是单价；'15.0' 必须按原文含 '.' 优先——数值判定下
+    # 15.0 == 15 会被当成整数排除，回退 min 曾把 6 选成单价。
+    t = ('投标人名称 | 服务费用总价（含税）元/人/天 | 增值税税率 | 备注\n'
+         '公司15.0 | 小写：15.0元/人/天 | （ 6 ）% | 无\n'
+         '重庆 | 服务费用总价（元/人/天） | 15.0')
+    r = m.extract_prices(t)
+    assert r['bidRate'] == '15元/人/天', r['bidRate']
+    assert r['taxRate'] == '6%', r['taxRate']
+
+
+def t_unit_price_comparison_findings():
+    # 单价标书：不报"未提取到任何报价"；相同/接近两档出服务单价比对 findings
+    import tempfile
+    body = ('投标人名称 | 服务费用总价（含税）元/人/天 | 增值税税率 | 备注\n'
+            '甲公司 | 小写：{v}元/人/天 | （ 6 ）% | 无\n'
+            '重庆 | 服务费用总价（元/人/天） | {v}\n')
+    with tempfile.TemporaryDirectory() as td:
+        p1 = os.path.join(td, '甲.txt')
+        p2 = os.path.join(td, '乙.txt')
+        with open(p1, 'w', encoding='utf-8') as f:
+            f.write(body.format(v='15.23'))
+        with open(p2, 'w', encoding='utf-8') as f:
+            f.write(body.format(v='15.23'))
+        res = m.run_full_analysis([p1, p2])
+        findings = ' '.join(str(x) for x in res['pricing'].get('findings', []))
+        assert '未提取到任何报价' not in findings, findings
+        assert '仅提取到成本明细' not in findings, findings
+        assert '服务单价完全一致' in findings, findings
+        with open(p2, 'w', encoding='utf-8') as f:
+            f.write(body.format(v='15.25'))
+        res2 = m.run_full_analysis([p1, p2])
+        f2 = ' '.join(str(x) for x in res2['pricing'].get('findings', []))
+        assert '服务单价' in f2 and '高度接近' in f2, f2
+
+
+def t_common_segments_chunked_extension_identical():
+    # 双向延伸的分块比较（64 字符切片相等）必须与逐字符语义完全一致：
+    # 构造 200 字符重复块（非 64 整数倍，走"整块 + 尾巴"两段路径），两侧
+    # 前缀/后缀均不同，最长公共段必须精确是 (3, 3, 200)。分块实现若在块
+    # 边界差一个字符，这里立刻失败。实测背景：投标人A×投标人B（357K/1.0M 字符）
+    # 逐字符延伸耗时 98s，分块后 3.5s，193 段指纹逐位相同。
+    S = ('一二三四五六七' * 29)[:200]
+    t1 = 'AAA' + S + 'BBB'
+    t2 = 'CCC' + S + 'DDD'
+    segs = m.find_common_segments(t1, t2, min_len=15)
+    longest = max(segs, key=lambda x: x[2])
+    assert (longest[0], longest[1], longest[2]) == (3, 3, 200), longest[:3]
+    # 反向验证：把 S 换成长度 130（2×64+2）也精确
+    S2 = ('甲乙丙丁戊' * 30)[:130]
+    r2 = m.find_common_segments('AAAA' + S2 + 'X', 'ZZZZ' + S2 + 'Y', min_len=15)
+    l2 = max(r2, key=lambda x: x[2])
+    assert (l2[0], l2[1], l2[2]) == (4, 4, 130), l2[:3]
+
+
+def t_bare_year_not_price():
+    # 裸年份（服务期/年份列，无'年'后缀）不是金额：分项曾累计到 1.6e17、
+    # '2,024 元报价完全一致' 的比对信号其实来自年份 2024/2025/2026。
+    assert m._is_bare_year_value(2026, '2026', '服务期限3年')
+    assert m._is_bare_year_value(2025.1, '2025.1', '2025年1月')
+    # 真金额不受影响
+    assert not m._is_bare_year_value(2026, '2026.00', '服务期')
+    assert not m._is_bare_year_value(2026, '2,026', '服务期')
+    assert not m._is_bare_year_value(2026, '2026元', '服务期')
+    assert not m._is_bare_year_value(2026, '2026', '投标总价 2026 万元')
+    assert not m._is_bare_year_value(1500, '1500', '服务期')
+    # 分项通道端到端：年份列不入 totalPrice
+    text = ('分项报价表 |\n序号 | 项目 | 金额 | 年份\n'
+            '1 | 材料费 | 120000 | 2026\n2 | 人工费 | 80000 | 2027')
+    r = m.extract_prices(text)
+    for it in (r.get('subItemPrice') or []):
+        assert it.get('totalPrice') not in (2026.0, 2027.0), it
+
+
+def t_toc_page_number_section_skipped():
+    # 目录行 '开标一览表20 / 三、投标报价21'（无点线、带页码）不得被认成
+    # 报价章节本体——首版 400 字价格信号守卫被相邻目录行的数字蒙混，整段
+    # 以目录为窗口搜索导致单价/税率全空。
+    toc = ('目录\n开标一览表20\n三、投标分项报价表21\n四、法人证明22\n'
+           '五、投标保证金24\n六、联合体协议26\n七、偏离表27\n' * 30)
+    assert m._find_bid_summary_section(toc) is None
+    real = toc + ('\n开标一览表\n投标人名称 | 服务费用总价（元/人/天） | 税率\n'
+                  '甲公司 | 15.35 | （ 6 ）%')
+    sec = m._find_bid_summary_section(real)
+    assert sec and '15.35' in sec
+
+
+def t_phantom_total_dropped_for_unit_price_bids():
+    # 单价形态标书 + 全文兜底总价 = 噪音（实测 15万保证金 / 550万历史合同 /
+    # 775万发票合计都被当过总价）→ 清除并给出解释；非单价标书保留原警告。
+    result = {
+        'totalPriceInTax': 5506500.0, 'totalPrice': 5506500.0,
+        'bidRate': '15.2元/人/天', '_from_global': True,
+        'warnings': [], 'subItemPrice': [], 'costDetails': [],
+    }
+    m._validate_price_extraction('历史采购合同金额 5506500 元', result, None)
+    assert result['totalPriceInTax'] is None and result['totalPrice'] is None
+    assert any('冲突' in w for w in result['warnings']), result['warnings']
+
+    result2 = {
+        'totalPriceInTax': 2000000.0, 'totalPrice': 2000000.0,
+        'bidRate': None, '_from_global': True,
+        'warnings': [], 'subItemPrice': [], 'costDetails': [],
+    }
+    m._validate_price_extraction('投标总价 2000000 元', result2, None)
+    assert result2['totalPriceInTax'] == 2000000.0  # 普通标书不受影响
+
+
+def t_docx_xml_fallback_rescues_broken_package():
+    # zip 内 rel 指向 NULL / .docm 宏文档：python-docx 抛异常，裸 XML 直读
+    # 回退把正文救回来（实测 4/12 份标书曾因此整份维度全空）。
+    import tempfile, zipfile
+    with tempfile.TemporaryDirectory() as td:
+        p = os.path.join(td, 'broken.docx')
+        doc_xml = ('<?xml version="1.0"?>'
+                   '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                   '<w:body><w:p><w:r><w:t>投标总价：壹拾伍元叁角伍分</w:t></w:r></w:p>'
+                   '<w:tbl><w:tr><w:tc><w:p><w:r><w:t>早餐服务费</w:t></w:r></w:p></w:tc>'
+                   '<w:tc><w:p><w:r><w:t>4.22</w:t></w:r></w:p></w:tc></w:tr></w:tbl>'
+                   '</w:body></w:document>')
+        # 缺 [Content_Types].xml：python-docx 必抛，XML 回退须成功
+        with zipfile.ZipFile(p, 'w') as zf:
+            zf.writestr('word/document.xml', doc_xml)
+        text, pages = m.extract_text_with_pages(p)
+        assert '投标总价' in text and '早餐服务费' in text, repr(text[:80])
+        assert pages == []
+
+
 def t_ref_derived_rewritten_clause_filtered():
     # 用户报告：招标文件合同条款被投标方改写（称谓替换 乙方→投标人、填空
     # 【  】→【5000元/次】、条款号重排）后，精确子串匹配漏检，条款以
