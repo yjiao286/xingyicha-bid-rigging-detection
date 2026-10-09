@@ -2330,6 +2330,49 @@ def t_unit_price_comparison_findings():
         assert '服务单价' in f2 and '高度接近' in f2, f2
 
 
+def t_person_role_word_and_crossline_rejected():
+    # 实测两类假人名（餐饮语料）：① 行尾散文短语 + 下一行行首角色被跨行
+    # 配对（'管理岗专项复盘能力培养\n项目经理、…' → '能力培养'）——姓名-
+    # 角色分隔符曾用 [\s、，,]（\s 含换行）；② 同行逗号形态 '由项目经理
+    # 负责…' → '经理负责'（'经'恰是姓氏，含职务词即非姓名）。真人名不受
+    # 影响（正例对照）。
+    t1 = ('项目管理机构\n'
+          '管理岗专项复盘能力培养\n项目经理、前厅主管、行政总厨每半年参加专题研修。\n'
+          '项目经理经验双轨并重\n项目经理须满足5年以上相关项目管理经验。\n'
+          'G、项目经理负责对改进措施的完成效果进行跟踪验证并反馈。\n'
+          '处理正常的投诉，项目经理跟进整改；检查过程中，项目经理驻场巡视。\n'
+          '王强 项目经理\n李勇 施工员')
+    r = m.extract_personnel(t1)
+    names = {p.get('name') for p in (r.get('all_persons') or [])}
+    assert '能力培养' not in names, names
+    assert '双轨并重' not in names, names
+    assert '经理负责' not in names, names
+    # 左边界：词中起抓的 2-4 字片段（'正常的投诉'→'常的投诉' 等）不得成姓名
+    assert '常的投诉' not in names, names
+    assert '查过程中' not in names, names
+    assert '王强' in names, names           # 正例：真姓名-角色仍在
+    # 职务头衔词包含规则：'董事长' 类头衔非姓名
+    assert not m._is_person_name('董事长')
+    assert not m._is_person_name('经理报告')
+    assert m._is_person_name('李旭丽')
+
+
+def t_std_listing_number_plus_name_word():
+    # 'GB2760-2024食品添加剂使用标准'：编号覆盖 + 标准名词使覆盖率停在
+    # 0.59（<0.6 门槛）——整段曾漏进高风险查重结果。编号形态与 标准/规范/
+    # 规程/准则 同现于一个 token 即判登记。
+    s = 'GB2760-2024食品添加剂使用标准'
+    assert m._is_standard_listing(s), s
+    assert m._is_standard_listing('GB 2760-2024 食品安全国家标准 食品添加剂使用标准')
+    line = s + '、GB14881-2013食品生产通用卫生规范'
+    t1 = '资质与标准：' + line + '。另附检测报告。'
+    t2 = '执行标准：' + line + '。详见附件。'
+    r = m.text_similarity_analysis({'甲.docx': t1, '乙.docx': t2})
+    pr = r['pair_results'][0]
+    assert pr['abnormal_count'] == 0, [(x['risk_level'], x['text'][:40]) for x in pr['matches']]
+    assert r['std_listing_count'] >= 1, r['std_listing_count']
+
+
 def t_common_segments_chunked_extension_identical():
     # 双向延伸的分块比较（64 字符切片相等）必须与逐字符语义完全一致：
     # 构造 200 字符重复块（非 64 整数倍，走"整块 + 尾巴"两段路径），两侧

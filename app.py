@@ -2100,6 +2100,12 @@ def _is_person_name(name):
         '中化', '中粮', '中船', '中车', '中航',
         # Professional/status terms not found in person names
         '执业', '评估师',
+        # 职务/头衔词：任何位置出现都非姓名——'经理负责'/'经理报告'（'经'
+        # 恰是姓氏）曾以 4 字短语身份通过姓氏校验；真实人名不含这些词。
+        '经理', '主管', '总监', '董事', '负责人', '主任', '工程师',
+        '组长', '队长', '班长',
+        # 结构助词：中文人名不含 '的'（'常的投诉' 类片段兜底）
+        '的',
     ]
 
     # ── Foreign / mixed-name path ──
@@ -2459,7 +2465,16 @@ def _extract_from_personnel_table(section_text, info):
         # captured instead of the label itself. The colon/zero-space
         # tolerance covers '陈刚 任中职务：项目经理'; traditional label forms
         # (任職務) are skipped the same way.
-        r'([一-鿿]{2,4}(?:[ \t]*[·•・][ \t]*[一-鿿]{2,4}){0,2})[\s、，,]+(?:[一-鿿]{0,2}(?:职务|職務|岗位|崗位|职称|職稱|角色|职责|職責)[：:]?\s*)?' + _TITLE_WORDS + r'\s*(' + _ROLES + r')',
+        # 分隔符不得含换行（[ \t、，,] 而非 [\s、，,]）：'\s' 含 \n 时
+        # 散文行尾短语 + 下一行行首角色会被配成姓名/职务——实测
+        # '管理岗专项复盘能力培养\n项目经理、前厅主管…' 抓出'能力培养'、
+        # '项目经理经验双轨并重\n项目经理须满足…' 抓出'双轨并重'（投标人B
+        # 一份文档 5 条假人名）。跨行的姓名-职务表单由带标签的模式承担。
+        # 姓名组带左边界（(?<![一-鿿])）：否组会从词中间起抓——实测
+        # '正常的投诉，项目经理…' 抓出'常的投诉'、'厨师长审核，项目经理…'
+        # 抓出'师长审核'、'排班表出勤，项目经理…' 抓出'班表出勤'（投标人C
+        # 12 条/投标人D 34 条此类 2-4 字片段）。真姓名前必是空白/标点/行首。
+        r'(?<![一-鿿])([一-鿿]{2,4}(?:[ \t]*[·•・][ \t]*[一-鿿]{2,4}){0,2})[ \t、，,]+(?:[一-鿿]{0,2}(?:职务|職務|岗位|崗位|职称|職稱|角色|职责|職責)[：:]?\s*)?' + _TITLE_WORDS + r'\s*(' + _ROLES + r')',
         r'(' + _ROLES + r')[：:][_＿\s]*([一-鿿](?:[ \t]*[一-鿿]){1,3}?(?:[ \t]*[·•・][ \t]*[一-鿿](?:[ \t]*[一-鿿]){1,3}?){0,2})(?![一-鿿])',
         # Role-then-name pairs must stay on ONE line: with '\s+' the role at
         # the end of one table row grabbed the next row's name
@@ -5604,6 +5619,10 @@ _CERT_WORD_RE_LIST = ('职业健康安全管理体系', '环境管理体系', '�
                       '检测能力', '检测报告', '业务范围', '审核员', '监督审核',
                       '再认证', '初审',
                       '认证', '证书', '认可', '资质', '实验室', '编号', '注册号',
+                      # 标准名本体：'标准：GB2760-2024食品添加剂使用标准' 的
+                      # 前导 '标准' token 只有 2 字、无覆盖，会把占比从 1.0
+                      # 稀释到 0.67 漏出（单 token 的 0.6 门槛按比例拦不住）
+                      '标准', '规范', '规程', '准则',
                       'haccp', 'cnas', 'cnca', 'cqc', 'iaf', 'iso')
 # 认证证书行常以机构名结尾（"XX认证中心有限公司"），实体后缀按登记语境
 # 容忍（只放宽覆盖计数，不改变 token 边界）。
@@ -5670,7 +5689,12 @@ def _is_standard_listing(text):
             if tok.endswith(suffix) and len(tok) > len(suffix):
                 cov += len(suffix)
                 break
-        if is_cert_no or cov / (b - a) >= 0.6:
+        # 编号形态 + 标准名词同现于一个 token（'gb2760-2024食品添加剂使用
+        # 标准'）＝无歧义标准引用：编号覆盖 + 名称词使覆盖率恰在 0.6 门槛
+        # 边缘（11+2/22=0.59），实测曾以 22 字整段漏进高风险查重结果。
+        if (is_cert_no or cov / (b - a) >= 0.6
+                or (_STD_DESIG_RE.search(tok)
+                    and re.search(r'标准|规范|规程|准则|技术要求', tok))):
             register += 1
     if (register / len(tokens) >= _STD_LISTING_RATIO
             and (sum(covered) >= 8 or cert_nos >= 1)):
