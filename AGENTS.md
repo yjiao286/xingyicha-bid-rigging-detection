@@ -65,6 +65,10 @@ within the expected range` / `The shortcut pathname must end with .lnk`）。解
 
 `星易查_围串标分析系统.tar.gz`（gitignore，本地产物）为 Docker 部署用源码包，含 app.py / requirements.txt / Dockerfile / docker-compose.yml / .dockerignore / AGENTS.md / templates / static。**代码变更后需重打**：`tar -czf 星易查_围串标分析系统.tar.gz app.py requirements.txt Dockerfile docker-compose.yml .dockerignore AGENTS.md templates static`。
 
+Windows 下 `tar.exe`（bsdtar）按系统 ANSI 代码页解析参数，含中文的**输出文件名**
+会被丢成 `???_???????.tar.gz`（本机 ACP=1252 实测，直接报 `Failed to open`）——
+先用 ASCII 临时名打包，再 `Move-Item` 改成中文名（各输入路径均为 ASCII，不受影响）。
+
 > **注意**：新增前端/报告使用的提取字段时，须同步加入 `_prepare_history_data()` 的 `_HISTORY_KEEP` keep 列表（app.py），否则该字段在历史记录及"历史记录 → 下载报告"场景中会丢失。keep 列表是"白名单"——除 `_` 开头键外其余键按类型置空（str→`''`、其他→`None`）；三个分区的 keep 均须包含 `name`（曾有重构丢 `name` 导致历史记录文件名全空的回归）。
 
 ## 敏感信息守卫（提交前必读）
