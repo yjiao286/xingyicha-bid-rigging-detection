@@ -2190,6 +2190,17 @@ def t_std_listing_detector():
         '认证依据GB/T 19001-2016/SO 9001:2015',
         '认证覆盖的业务范围',
         '质量管理体系认证证书 编号：00121Q30215R2M GB/T19001-2016',
+        # 认证证书页的审核员行/批准号/标准符合行（用户第二批实测漏判）：
+        # 登记号被"人名 + 审核员 + 审核阶段"稀释，需靠证书登记号冗余规则
+        ('张某某（2023-N1EMS-4024505，审核员，监督审核),李某某（2023-N1EMS-4029046，审核员，初审一阶段）.'
+         '王月辉（2023-N1OHSMS-4025882，审核员，再认证二阶段),白颖（2023-N1OHSMS-4042728，审核员，监督审核）'),
+        '张某某（2023-N1EMS-4024505，审核员）',
+        '认证中心有限公司\n·机构批准号\nCNCA-R-2002-0',
+        '·机构批准号\nCNCA-R-2002-0',
+        # 证书页单行片段（实际匹配段而非整块）：体系全名必须覆盖，
+        # '环境管理体系'只被'管理体系'覆盖 4/9=0.44 时此形态会漏出
+        '环境管理体系符合标准：\nGB/T24001-2016/',
+        '质量管理体系符合标准：\nGB/T19001-2016/',
     ]
     for s in positives:
         assert m._is_standard_listing(s), s[:40]
@@ -2201,6 +2212,8 @@ def t_std_listing_detector():
         '每日对中央厨房的温度记录、留样记录与消毒记录进行三方核查，并按月向采购人提交食品安全自查报告与整改闭环台账。',
         '本项目投标报价为人民币贰佰万元整，服务期限三年，配备项目经理一名、食品安全员六名。',
         '我方按GB/T19001标准建立质量管理体系，覆盖投标范围内全部服务，实行过程检验与不合格品控制。',
+        '北京某某餐饮管理有限公司成立于2004年，拥有员工两千人，服务网点遍布全国十二个省份。',
+        '检测报告编号2023-JC-0012345显示样品符合要求，我方已将报告原件附于标书第七章第二节。',
     ]
     for s in negatives:
         assert not m._is_standard_listing(s), s[:40]
@@ -2232,6 +2245,16 @@ def t_std_listing_filtered_from_similarity():
     pr2 = r2['pair_results'][0]
     assert pr2['abnormal_count'] == 0, [(mt['risk_level'], mt['text'][:40]) for mt in pr2['matches']]
     assert not any(mt.get('near_duplicate') for mt in pr2['matches'] if mt['abnormal'])
+
+    # 认证证书页整块（审核员行 + 机构批准号 + 体系符合标准）同样不得漏出
+    block = ('张某某（2023-N1EMS-4024505，审核员，监督审核),李某某（2023-N1EMS-4029046，审核员，初审一阶段）\n'
+             '认证中心有限公司\n·机构批准号\nCNCA-R-2002-0\n质量管理体系符合标准：\nGB/T19001-2016/\n'
+             '环境管理体系符合标准：\nGB/T24001-2016/')
+    r3 = m.text_similarity_analysis({'甲.docx': '资质证书附件：\n' + block + '\n本证书有效期三年。',
+                                     '乙.docx': '资质证明：\n' + block + '\n详见原件。'})
+    pr3 = r3['pair_results'][0]
+    assert pr3['abnormal_count'] == 0, [(mt['risk_level'], mt['text'][:40]) for mt in pr3['matches']]
+    assert r3['std_listing_count'] >= 1, r3['std_listing_count']
 
 
 def t_std_listing_keeps_mixed_paragraph_abnormal():

@@ -5343,10 +5343,22 @@ _STD_DESIG_RE = re.compile(
     r'\d[a-z0-9\-–—/.:]*'
 )
 _STD_TITLE_RE = re.compile(r'[《<][^》>]{2,30}(?:标准|规范|规程|准则|技术要求)[^》>]{0,16}[》>]')
-_CERT_WORD_RE_LIST = ('认证项目', '认证依据', '认证覆盖', '认证证书', '管理体系', '体系认证',
-                      '实验室认可', '机构批准号', '检测能力', '检测报告', '业务范围',
+_CERT_WORD_RE_LIST = ('职业健康安全管理体系', '环境管理体系', '质量管理体系',
+                      '食品安全管理体系', '信息安全管理体系', '管理体系',
+                      '认证项目', '认证依据', '认证覆盖', '认证证书', '认证中心',
+                      '认证机构', '体系认证', '实验室认可', '机构批准号',
+                      '检测能力', '检测报告', '业务范围', '审核员', '监督审核',
+                      '再认证', '初审',
                       '认证', '证书', '认可', '资质', '实验室', '编号', '注册号',
                       'haccp', 'cnas', 'cnca', 'cqc', 'iaf', 'iso')
+# 认证证书行常以机构名结尾（"XX认证中心有限公司"），实体后缀按登记语境
+# 容忍（只放宽覆盖计数，不改变 token 边界）。
+_STD_ENTITY_SUFFIXES = ('股份有限公司', '有限责任公司', '有限公司', '公司')
+# 冗余判定：>=2 个证书登记号（'2023-N1EMS-4024505' 形态）+ 认证类词汇
+# >=2 处 —— 覆盖"人名 + 审核员 + 审核阶段"环绕登记号的证书页行，此类行
+# 的登记号占比会被人名/阶段词稀释到占比阈值以下（如 4/16=0.25）。
+_STD_CERT_NO_MIN = 2
+_STD_CERT_HINT_WORDS = ('认证', '审核', '证书', '批准号', '资质', '认可')
 _STD_TOKEN_SPLIT = re.compile(
     r'[，,。；;：:、（）()\[\]【】《》<>“”"\'’‘.!?\s]+')
 _CERT_NUM_RE = re.compile(r'[0-9][0-9a-z\-–—/.]{7,}')
@@ -5391,15 +5403,34 @@ def _is_standard_listing(text):
     if not tokens:
         return False
     register = 0
+    cert_nos = 0
     for tok, a, b in tokens:
         cov = sum(covered[a:b])
         digits = sum(c.isdigit() for c in tok)
         is_cert_no = (bool(_CERT_NUM_RE.fullmatch(tok))
                       and any(c.isalpha() for c in tok) and digits >= 3)
+        if is_cert_no:
+            cert_nos += 1
+        # 实体后缀（有限公司…）在登记语境下按已覆盖计
+        for suffix in _STD_ENTITY_SUFFIXES:
+            if tok.endswith(suffix) and len(tok) > len(suffix):
+                cov += len(suffix)
+                break
         if is_cert_no or cov / (b - a) >= 0.6:
             register += 1
-    return (register / len(tokens) >= _STD_LISTING_RATIO
-            and sum(covered) >= 8)
+    if (register / len(tokens) >= _STD_LISTING_RATIO
+            and sum(covered) >= 8):
+        return True
+    if cert_nos >= _STD_CERT_NO_MIN:
+        hints = sum(t.count(w) for w in _STD_CERT_HINT_WORDS)
+        if hints >= 2:
+            return True
+    # 单条审核员/批准号行（"张某某（2023-N1EMS-4024505，审核员）"）：数量
+    # 不足但形态唯一——注册号 + 审核/批准号词汇即认证文书内容（人事语境
+    # 写"内审员"不含"审核"二字，不受影响）。
+    if cert_nos >= 1 and ('审核' in t or '批准号' in t):
+        return True
+    return False
 
 
 def is_template_content(text):
