@@ -133,6 +133,18 @@ available = set()
 BUILTINS = {"sys", "builtins", "_thread", "_io", "posix", "nt", "_warnings",
             "_signal", "_weakref", "_abc", "_collections_abc", "codecs",
             "_frozen_importlib", "_frozen_importlib_external", "time", "math", "_json", "array", "binascii", "fcntl", "select", "unicodedata", "zlib", "ssl", "hashlib"}
+# 平台条件导入：只在特定平台存在（或由解释器/系统提供）的模块，app.py 一律在
+# 函数内用 os.name / sys.platform 守卫后再 import。便携包只跑 Linux，审计不能
+# 因为 Windows/macOS 专有模块不在 Linux 标准库里就判失败——AppKit/Foundation
+# 曾让本步在没有任何 Windows 代码时就已经报错退出（winreg 是同类的第三个）。
+# 新增平台专有 import 时同步加到这里。**名字必须小写**——下面的比对是
+# `p.lower() not in available`，大小写不一致等于没加（AppKit 就曾这样白加）。
+PLATFORM_ONLY = {"winreg", "msvcrt", "winsound", "_winapi", "pystray", "pil",
+                 "appkit", "foundation", "pyobjctools", "objc"}
+# 可选依赖：app.py 对缺失有显式降级，便携包里没有也不算坏——
+#   waitress：缺失时回落 Flask 开发服务器（app.py __main__ 的 except ImportError）
+#   rapidocr：新旧两个引擎包二选一，便携包只装 rapidocr_onnxruntime
+OPTIONAL_IMPORTS = {"waitress", "rapidocr", "gunicorn"}
 
 # vendored 第三方（site-packages）
 if os.path.isdir(site):
@@ -164,7 +176,7 @@ if os.path.isdir(stdlib):
         for d in os.listdir(dynload):
             if d.endswith('.so'):
                 available.add(d.split('.')[0].lower())
-available |= BUILTINS
+available |= BUILTINS | PLATFORM_ONLY | OPTIONAL_IMPORTS
 
 imports = re.findall(r'^\s*(?:import|from)\s+([a-zA-Z0-9_]+)', app_src, re.M)
 missing = [p for p in sorted(set(imports))
@@ -172,7 +184,8 @@ missing = [p for p in sorted(set(imports))
 if missing:
     print("  ✗ 缺失 import:", ", ".join(missing))
     sys.exit(1)
-print("  ✓ 全部顶层 import 可解析 (stdlib + vendored 第三方)")
+print("  ✓ 全部顶层 import 可解析 (stdlib + vendored 第三方"
+      " + %d 个平台专有 + %d 个可选)" % (len(PLATFORM_ONLY), len(OPTIONAL_IMPORTS)))
 PYEOF
 
 # 校验 wheel 平台标签均为 linux（pure-python 为 py3-none-any 也通过）

@@ -8,7 +8,7 @@
 
 #define MyAppName "星易查"
 #define MyAppFullName "星易查 - 围串标风险识别分析系统"
-#define MyAppVersion "2.3.0"
+#define MyAppVersion "2.4.0"
 #define MyAppExeName "星易查.exe"
 
 [Setup]
@@ -52,17 +52,48 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 Filename: "{app}\{#MyAppExeName}"; Description: "立即启动 {#MyAppName}"; Flags: nowait postinstall skipifsilent
 
 [Code]
+function RegSaysLibreOffice(RootKey: Integer): Boolean;
+var
+  P: String;
+begin
+  // LibreOffice 把安装目录写进 SOFTWARE\LibreOffice\UNO\InstallPath，
+  // 装到 D 盘等自定义目录时只有这里能查到；值名各版本不同
+  // （默认值 / Path / InstallPath），三个都试。
+  Result := False;
+  P := '';
+  if RegQueryStringValue(RootKey, 'SOFTWARE\LibreOffice\UNO\InstallPath', '', P) and (P <> '') then Result := True;
+  if RegQueryStringValue(RootKey, 'SOFTWARE\LibreOffice\UNO\InstallPath', 'Path', P) and (P <> '') then Result := True;
+  if RegQueryStringValue(RootKey, 'SOFTWARE\LibreOffice\UNO\InstallPath', 'InstallPath', P) and (P <> '') then Result := True;
+end;
+
+function LibreOfficeDetected: Boolean;
+begin
+  Result := True;
+  if FileExists(ExpandConstant('{autopf64}\LibreOffice\program\soffice.exe')) then Exit;
+  if FileExists(ExpandConstant('{autopf32}\LibreOffice\program\soffice.exe')) then Exit;
+  if RegSaysLibreOffice(HKLM) then Exit;
+  if RegSaysLibreOffice(HKCU) then Exit;
+  // 本安装器未开 ArchitecturesInstallIn64BitMode（32 位安装模式），flag-less 的
+  // HKLM/HKCU 读的是 32 位视图；64 位 LibreOffice 装在自定义目录时把路径写在
+  // 64 位视图（WOW6432Node 才是它的 32 位兄弟）。HKEY_*_64 常量在 32 位
+  // Windows 上会内部报错，故用 IsWin64 守卫。
+  if IsWin64 and RegSaysLibreOffice(HKEY_LOCAL_MACHINE_64) then Exit;
+  if IsWin64 and RegSaysLibreOffice(HKEY_CURRENT_USER_64) then Exit;
+  Result := False;
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
-  // 安装完成后提示 LibreOffice（.doc 正文解析的可选依赖）
-  if (CurStep = ssPostInstall) and
-     not FileExists(ExpandConstant('{autopf64}\LibreOffice\program\soffice.exe')) and
-     not FileExists(ExpandConstant('{autopf32}\LibreOffice\program\soffice.exe')) then
+  // 安装完成后提示 LibreOffice（.doc 正文解析的可选依赖）。
+  // 装在自定义目录时注册表有记录，不再误报"未检测到"。
+  if (CurStep = ssPostInstall) and not LibreOfficeDetected then
     MsgBox(
       '提示：未检测到 LibreOffice。' + #13#10#13#10 +
       '解析 .doc 格式标书的【正文】时需要 LibreOffice（免费，官网 libreoffice.org 可下载）。' + #13#10 +
       '未安装时将自动跳过 .doc 正文提取，.doc 元数据比对不受影响；' + #13#10 +
-      'docx / pdf / 扫描件OCR / xlsx / txt 等功能完全不受影响。' + #13#10#13#10 +
+      'docx / pdf / 扫描件OCR / xlsx / txt 等功能完全不受影响。' + #13#10 +
+      '若已装在非默认位置（如 D 盘），星易查运行时会自动识别注册表记录；' + #13#10 +
+      '也可设环境变量 SOFFICE_PATH 指向 soffice.exe 或安装目录。' + #13#10#13#10 +
       '需要时可稍后自行安装 LibreOffice，安装后无需重新安装本软件，重启即可生效。',
       mbInformation, MB_OK);
 end;

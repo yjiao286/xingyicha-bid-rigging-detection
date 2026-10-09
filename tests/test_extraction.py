@@ -2706,6 +2706,575 @@ def t_report_table_has_page_columns():
     assert len(doc.tables) == 1
 
 
+def _chmod_x(path):
+    """显式覆盖要求可执行位（POSIX）；Windows 无 X_OK，chmod 失败忽略。"""
+    try:
+        os.chmod(path, 0o755)
+    except OSError:
+        pass
+
+
+def t_soffice_probe_paths_per_os():
+    # 每个平台的已知安装位置必须是纯数据（不碰文件系统），否则 Windows /
+    # Linux 分支在这台机器上根本无法回归。路径一律用 ntpath/posixpath 拼，
+    # 保证在任意宿主上都是目标平台形态。
+    win = m._soffice_probe_paths('nt', {
+        'PROGRAMFILES': r'C:\Program Files',
+        'ProgramFiles(x86)': r'C:\Program Files (x86)',
+        'LOCALAPPDATA': r'C:\Users\u\AppData\Local'})
+    assert r'C:\Program Files\LibreOffice*\program\soffice.exe' in win, win
+    assert r'C:\Program Files (x86)\LibreOffice*\program\soffice.exe' in win, win
+    assert r'C:\Users\u\AppData\Local\Programs\LibreOffice*\program\soffice.exe' in win, win
+    # 环境变量缺失时退回默认根目录（安装器默认路径）
+    assert m._soffice_probe_paths('nt', {})[0] == \
+        r'C:\Program Files\LibreOffice*\program\soffice.exe'
+
+    mac = m._soffice_probe_paths('darwin', {})
+    assert '/Applications/LibreOffice.app/Contents/MacOS/soffice' in mac, mac
+    # Finder 双击启动的 .app 继承 launchd 最小 PATH（不含 Homebrew），
+    # 所以 /opt/homebrew/bin 必须显式探测。
+    assert any(p.endswith('/opt/homebrew/bin/soffice') for p in mac), mac
+    assert any(p.endswith('/usr/local/bin/soffice') for p in mac), mac
+
+    linux = m._soffice_probe_paths('posix', {})
+    for p in ('/usr/bin/soffice', '/usr/lib/libreoffice/program/soffice',
+              '/snap/bin/libreoffice', '/opt/libreoffice*/program/soffice'):
+        assert p in linux, (p, linux)
+    assert not m._text_tool_probe_paths('nt', {}), 'Windows 无 antiword/catdoc 位置'
+    assert '/opt/homebrew/bin/antiword' in m._text_tool_probe_paths('darwin', {})
+
+
+def t_first_file_order_and_glob():
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        assert m._first_file([os.path.join(td, 'nope'), None, '']) is None
+        b = os.path.join(td, 'b')
+        open(b, 'w').close()
+        # 顺序即优先级：先探测到的先用
+        assert m._first_file([os.path.join(td, 'missing'), b,
+                              os.path.join(td, 'unused')]) == b
+        # glob 覆盖版本化安装目录（/opt/libreoffice25.2/program/soffice）
+        d = os.path.join(td, 'libreoffice25.2', 'program')
+        os.makedirs(d)
+        exe = os.path.join(d, 'soffice')
+        open(exe, 'w').close()
+        assert m._first_file([os.path.join(td, 'libreoffice*', 'program',
+                                           'soffice')]) == exe
+
+
+def t_soffice_env_override_forms():
+    # SOFFICE_PATH 可指向 soffice 本体 / 安装根目录 / program 目录 /
+    # macOS .app 包——用户从"属性"里复制的路径形态五花八门，每一种都要认。
+    import tempfile
+    saved = os.environ.get('SOFFICE_PATH')
+    exe_name = 'soffice.exe' if os.name == 'nt' else 'soffice'
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            exe = os.path.join(td, exe_name)
+            open(exe, 'w').close()
+            _chmod_x(exe)
+            os.environ['SOFFICE_PATH'] = exe
+            assert m._soffice_from_env() == exe, m._soffice_from_env()
+            # Windows 用户常连引号一起粘贴，或带尾随空格
+            os.environ['SOFFICE_PATH'] = f'  "{exe}"  '
+            assert m._soffice_from_env() == exe, m._soffice_from_env()
+
+            root = os.path.join(td, 'LibreOffice')
+            os.makedirs(os.path.join(root, 'program'))
+            win_exe = os.path.join(root, 'program', 'soffice.exe')
+            open(win_exe, 'w').close()
+            _chmod_x(win_exe)
+            for form in (root, os.path.join(root, 'program')):
+                os.environ['SOFFICE_PATH'] = form
+                assert m._soffice_from_env() == win_exe, (form, m._soffice_from_env())
+
+            if os.name != 'nt':          # .app 包是 macOS 形态
+                macdir = os.path.join(td, 'LibreOffice.app', 'Contents', 'MacOS')
+                os.makedirs(macdir)
+                mac_exe = os.path.join(macdir, 'soffice')
+                open(mac_exe, 'w').close()
+                _chmod_x(mac_exe)
+                os.environ['SOFFICE_PATH'] = os.path.join(td, 'LibreOffice.app')
+                assert m._soffice_from_env() == mac_exe, m._soffice_from_env()
+    finally:
+        if saved is None:
+            os.environ.pop('SOFFICE_PATH', None)
+        else:
+            os.environ['SOFFICE_PATH'] = saved
+
+
+def t_soffice_env_alias_and_bogus_value():
+    # LIBREOFFICE_PATH 是 SOFFICE_PATH 的别名；指向不存在的位置时绝不能把
+    # 转换器锁成无效值——那会让 .doc 正文静默全空，比"未检测到"更难排查。
+    import tempfile
+    keys = ('SOFFICE_PATH', 'LIBREOFFICE_PATH')
+    saved = {k: os.environ.get(k) for k in keys}
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            exe = os.path.join(td, 'soffice.exe' if os.name == 'nt' else 'soffice')
+            open(exe, 'w').close()
+            _chmod_x(exe)
+            os.environ.pop('SOFFICE_PATH', None)
+            os.environ['LIBREOFFICE_PATH'] = exe
+            assert m._soffice_from_env() == exe, m._soffice_from_env()
+
+            # SOFFICE_PATH 无效 → 继续尝试别名，而不是直接放弃
+            os.environ['SOFFICE_PATH'] = os.path.join(td, 'nope')
+            assert m._soffice_from_env() == exe, m._soffice_from_env()
+
+            # 两个都无效 → 返回 None（交由自动探测），不得返回无效路径
+            os.environ['LIBREOFFICE_PATH'] = os.path.join(td, 'nope2')
+            assert m._soffice_from_env() is None, m._soffice_from_env()
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def t_soffice_env_override_must_be_executable():
+    # 显式覆盖必须真的能启动：数据文件、相对路径、通配符都不能被认成转换器
+    # （旧实现连 SOFFICE_PATH='*' 都会 glob 到 CWD 里的第一个文件并锁死为
+    # "libreoffice"，之后每份 .doc 都静默变空——比"未检测到"更难排查）。
+    import tempfile
+    keys = ('SOFFICE_PATH', 'LIBREOFFICE_PATH', 'SOFFICE_HOME')
+    saved = {k: os.environ.get(k) for k in keys}
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            for k in keys:
+                os.environ.pop(k, None)
+            os.environ['SOFFICE_PATH'] = '*'
+            assert m._soffice_from_env() is None, '通配符不得被当成转换器'
+            os.environ['SOFFICE_PATH'] = 'relative/soffice'
+            assert m._soffice_from_env() is None, '相对路径不得被当成转换器'
+            plain = os.path.join(td, 'soffice-data.txt')
+            open(plain, 'w').close()
+            os.environ['SOFFICE_PATH'] = plain
+            assert m._soffice_from_env() is None, '非可执行文件不得被当成转换器'
+            if os.name != 'nt':      # Windows 判据是扩展名，下面两条是 POSIX 语义
+                os.environ['SOFFICE_PATH'] = '/etc/passwd'
+                assert m._soffice_from_env() is None
+                exe = os.path.join(td, 'soffice')
+                open(exe, 'w').close()
+                _chmod_x(exe)
+                # %VAR%/$VAR 展开（Windows 用户常复制 %ProgramFiles%\... 形态）
+                os.environ['SOFFICE_HOME'] = td
+                os.environ['SOFFICE_PATH'] = '$SOFFICE_HOME/soffice'
+                assert m._soffice_from_env() == exe, m._soffice_from_env()
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def t_soffice_probe_globs_are_escaped():
+    # 安装根目录里带 [ ] 时（'D:\Program Files [x64]'）必须转义，否则 glob 把
+    # 它当字符类、静默匹配不到——旧实现是字面 join+isfile，不存在这个问题。
+    import glob as _glob
+    import tempfile
+    pat = m._soffice_probe_paths('nt', {
+        'PROGRAMFILES': r'D:\Program Files [x64]',
+        'ProgramFiles(x86)': r'C:\Program Files (x86)'})
+    assert '[[]' in pat[0], pat[0]
+    with tempfile.TemporaryDirectory() as td:
+        root = os.path.join(td, 'Program Files [x64]')
+        prog = os.path.join(root, 'LibreOffice 25.2', 'program')
+        os.makedirs(prog)
+        exe = os.path.join(prog, 'soffice')
+        open(exe, 'w').close()
+        escaped = os.path.join(_glob.escape(root), 'LibreOffice*', 'program', 'soffice')
+        raw = os.path.join(root, 'LibreOffice*', 'program', 'soffice')
+        assert m._first_file([escaped]) == exe
+        assert m._first_file([raw]) is None, '未转义的字符类本就不该命中'
+
+
+def t_doc_libreoffice_failure_falls_back_to_text_tool():
+    # LibreOffice 被选中却转换不出内容时（残缺/绿色版安装、snap 包装器、权限
+    # 被回收），必须退回 antiword/catdoc：否则相似度/人员/报价/混装全看到空
+    # 文档——而这正是"探测面扩大 + 优先 LibreOffice"之后新可达的形态。
+    if os.name == 'nt':
+        return                    # 用 sh 脚本做假转换器，POSIX 专属
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        doc = os.path.join(td, 'x.doc')
+        with open(doc, 'wb') as f:
+            f.write(b'\xd0\xcf\x11\xe0dummy')
+        broken = os.path.join(td, 'soffice')
+        with open(broken, 'w') as f:
+            f.write('#!/bin/sh\nexit 1\n')
+        good = os.path.join(td, 'antiword')
+        with open(good, 'w') as f:
+            f.write('#!/bin/sh\necho FALLBACK-TEXT\n')
+        for pth in (broken, good):
+            _chmod_x(pth)
+        saved = (m._DOC_CONVERTER, m._DOC_TEXT_FALLBACK, m._DOC_USED_FALLBACK,
+                 m._DOCX_CACHE, m.EXTRACT_CACHE_ENABLED, m.EXTRACT_CACHE_DIR)
+        try:
+            m._DOC_CONVERTER, m._DOC_TEXT_FALLBACK = broken, good
+            m._DOCX_CACHE = {}
+            assert m.extract_doc_text_raw(doc) == 'FALLBACK-TEXT'
+            assert m._DOC_USED_FALLBACK is True
+            # 兜底产出的正文不得写缓存：它取决于运行期 LibreOffice 是否可用，
+            # 而缓存键只记录配置与工具种类（修好 LibreOffice 后应重新提取）
+            with tempfile.TemporaryDirectory() as cache:
+                m.EXTRACT_CACHE_DIR, m.EXTRACT_CACHE_ENABLED = cache, True
+                writes = []
+                real_write = m._extract_cache_write
+                m._extract_cache_write = lambda *a, **k: writes.append(a)
+                try:
+                    got = m.extract_text_with_tables(doc)
+                finally:
+                    m._extract_cache_write = real_write
+                assert got == 'FALLBACK-TEXT', got
+                assert not writes, '兜底产出的 .doc 正文不应进缓存'
+        finally:
+            (m._DOC_CONVERTER, m._DOC_TEXT_FALLBACK, m._DOC_USED_FALLBACK,
+             m._DOCX_CACHE, m.EXTRACT_CACHE_ENABLED, m.EXTRACT_CACHE_DIR) = saved
+
+
+def t_doc_converter_precedence_env_path_antiword():
+    # 优先级：SOFFICE_PATH → PATH → antiword/catdoc 兜底。LibreOffice 是
+    # 文档化的优先项（能带表格），antiword 只有在彻底找不到时才能上位。
+    import tempfile
+    saved_path = os.environ.get('PATH')
+    saved_env = os.environ.get('SOFFICE_PATH')
+    saved_alias = os.environ.get('LIBREOFFICE_PATH')
+    saved_probe = m._soffice_probe_paths
+    saved_text = m._text_tool_probe_paths
+    saved_reg = m._soffice_from_registry
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            bindir = os.path.join(td, 'bin')
+            os.makedirs(bindir)
+            for name in ('soffice', 'soffice.exe', 'antiword', 'antiword.exe'):
+                p = os.path.join(bindir, name)
+                open(p, 'w').close()
+                try:
+                    os.chmod(p, 0o755)
+                except OSError:
+                    pass
+            os.environ['PATH'] = bindir
+            # 探测列表与注册表置空：断言只依赖 PATH，不受"本机真装了
+            # LibreOffice"影响
+            m._soffice_probe_paths = lambda *a, **k: []
+            m._text_tool_probe_paths = lambda *a, **k: []
+            m._soffice_from_registry = lambda: None
+            os.environ.pop('SOFFICE_PATH', None)
+            os.environ.pop('LIBREOFFICE_PATH', None)
+            got = m._resolve_doc_converter()
+            assert os.path.basename(got).lower().startswith('soffice'), got
+            assert m._doc_converter_kind(got) == 'libreoffice', got
+
+            # SOFFICE_PATH 必须压过 PATH 上找到的 soffice（否则用户"明确
+            # 指定了却仍走另一个"——探测顺序是这条链的全部意义）
+            explicit = os.path.join(td, 'soffice.exe' if os.name == 'nt' else 'explicit-soffice')
+            open(explicit, 'w').close()
+            _chmod_x(explicit)      # 显式覆盖要求可执行（见 _is_usable_executable）
+            os.environ['SOFFICE_PATH'] = explicit
+            assert m._resolve_doc_converter() == explicit, m._resolve_doc_converter()
+            os.environ.pop('SOFFICE_PATH', None)
+            assert m._resolve_doc_converter() == got, m._resolve_doc_converter()
+
+            # PATH 里只剩 antiword → 兜底生效（不再是"没有转换器"）
+            os.remove(os.path.join(bindir, 'soffice'))
+            os.remove(os.path.join(bindir, 'soffice.exe'))
+            got2 = m._resolve_doc_converter()
+            assert os.path.basename(got2).lower().startswith('antiword'), got2
+            assert m._doc_converter_kind(got2) == 'antiword', got2
+
+            # 彻底找不到 → None（而不是崩溃或无效路径），启动横幅与
+            # --check 的 WARN 分支正是靠这个返回值判定
+            os.remove(os.path.join(bindir, 'antiword'))
+            os.remove(os.path.join(bindir, 'antiword.exe'))
+            assert m._resolve_doc_converter() is None, m._resolve_doc_converter()
+    finally:
+        m._soffice_probe_paths = saved_probe
+        m._text_tool_probe_paths = saved_text
+        m._soffice_from_registry = saved_reg
+        if saved_path is not None:
+            os.environ['PATH'] = saved_path
+        for key, val in (('SOFFICE_PATH', saved_env),
+                         ('LIBREOFFICE_PATH', saved_alias)):
+            if val is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = val
+
+
+def t_soffice_registry_probe_views_and_value_names():
+    # Windows 注册表分支是"LibreOffice 装在 D 盘也能识别"的唯一依据，却在
+    # 非 Windows 宿主上跑不到——用假 winreg 注入覆盖控制流：默认值/命名值
+    # 都读、64 位视图缺失要落到 32 位视图（WOW6432Node）、HKLM 空则用 HKCU、
+    # 非字符串值忽略、句柄必关、最坏情况返回 None 而不抛异常（导入期执行）。
+    closed = []
+
+    class _FakeKey:
+        def __init__(self, values):
+            self.values = values
+
+        def Close(self):
+            closed.append(True)
+
+    class _FakeWinreg:
+        HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER = 1, 2
+        KEY_READ, KEY_WOW64_64KEY, KEY_WOW64_32KEY = 0x20019, 0x100, 0x200
+
+        def __init__(self, store):
+            # store: {(root, view): {value_name: value}}
+            self.store = store
+
+        def OpenKey(self, root, sub, reserved, access):
+            values = self.store.get((root, access & 0x300))
+            if values is None:
+                raise FileNotFoundError(2, 'no key')
+            return _FakeKey(values)
+
+        def QueryValueEx(self, key, name):
+            if name not in key.values:
+                raise FileNotFoundError(2, 'no value')
+            return key.values[name], 1
+
+        def EnumValue(self, key, i):
+            items = list(key.values.items())
+            if i >= len(items):
+                raise OSError(259, 'no more data')
+            return items[i][0], items[i][1], 1
+
+    saved_first = m._first_file
+    seen = []
+    try:
+        def _fake_first(paths):
+            seen.append(list(paths))
+            return paths[0] if paths else None
+
+        m._first_file = _fake_first
+        # ① 默认值形态：真实值形如 C:\Program Files\LibreOffice\program\
+        #    （**单个**尾随反斜杠），候选列表要能拼出 ...\program\soffice.exe。
+        #    拼接按 Windows 语义（ntpath.join），本机是 POSIX 也照样值 Windows 形态。
+        win_value = 'C:\\LO\\program\\'
+        wr = _FakeWinreg({(_FakeWinreg.HKEY_LOCAL_MACHINE, 0x100):
+                          {'': win_value}})
+        saved_join, os.path.join = os.path.join, m.ntpath.join
+        try:
+            hit = m._soffice_from_registry('nt', wr)
+        finally:
+            os.path.join = saved_join
+        assert hit == win_value, hit
+        assert seen[0][0] == win_value, seen[0]
+        assert r'C:\LO\program\soffice.exe' in seen[0], seen[0]
+        assert closed, '注册表句柄必须关闭'
+
+        # ② 命名值（版本差异：Path / InstallPath），空值要跳过
+        wr2 = _FakeWinreg({(_FakeWinreg.HKEY_LOCAL_MACHINE, 0x100):
+                           {'InstallTime': '', 'Path': r'D:\LO'}})
+        assert m._soffice_from_registry('nt', wr2) == r'D:\LO'
+
+        # ③ 64 位视图没有该键 → 回退 32 位视图
+        wr3 = _FakeWinreg({(_FakeWinreg.HKEY_LOCAL_MACHINE, 0x200):
+                           {'': r'E:\LO\program'}})
+        assert m._soffice_from_registry('nt', wr3) == r'E:\LO\program'
+
+        # ④ HKLM 全无、HKCU 有 → 按用户安装同样认
+        wr4 = _FakeWinreg({(_FakeWinreg.HKEY_CURRENT_USER, 0x100):
+                           {'': r'F:\LO'}})
+        assert m._soffice_from_registry('nt', wr4) == r'F:\LO'
+
+        # ⑤ 非字符串值忽略；全空 / 键不存在 → None，且不抛异常
+        wr5 = _FakeWinreg({(_FakeWinreg.HKEY_LOCAL_MACHINE, 0x100):
+                           {'': 0, 'Path': 12}})
+        assert m._soffice_from_registry('nt', wr5) is None
+        assert m._soffice_from_registry('nt', _FakeWinreg({})) is None
+
+        # ⑥ 非 Windows 平台直接返回 None（连 winreg 都不导入）
+        assert m._soffice_from_registry(
+            'posix', _FakeWinreg({(_FakeWinreg.HKEY_LOCAL_MACHINE, 0x100):
+                                  {'': r'G:\LO'}})) is None
+        # 默认调用（无参）在本机走平台判断分支，不得抛异常
+        assert m._soffice_from_registry() is None or os.name == 'nt'
+    finally:
+        m._first_file = saved_first
+
+
+def t_doc_converter_kind_basename():
+    # 归类按 basename：Windows 全路径 soffice.exe、macOS .app 包内路径、
+    # 用户自定义的 wrapper 脚本都要落到 libreoffice 分支（否则会走
+    # antiword 的"只读 stdout"调用方式，转换必然失败）。路径分隔符两种
+    # 形态都认，所以这些断言在任意宿主上都成立。
+    assert m._doc_converter_kind('/usr/bin/antiword') == 'antiword'
+    assert m._doc_converter_kind(r'C:\tools\antiword.exe') == 'antiword'
+    assert m._doc_converter_kind('/usr/bin/catdoc') == 'catdoc'
+    assert m._doc_converter_kind(
+        r'C:\Program Files\LibreOffice\program\soffice.exe') == 'libreoffice'
+    assert m._doc_converter_kind(
+        '/Applications/LibreOffice.app/Contents/MacOS/soffice') == 'libreoffice'
+    assert m._doc_converter_kind('/opt/my-soffice-wrapper.sh') == 'libreoffice'
+    assert m._doc_converter_kind('') is None
+    # 无参调用 = 当前解析结果
+    assert m._doc_converter_kind(m._DOC_CONVERTER) == m._doc_converter_kind()
+
+
+def t_extract_cache_key_covers_doc_converter():
+    # .doc 正文随转换器而变（antiword/catdoc 纯文本 vs LibreOffice 转 docx
+    # 带表格），装了 LibreOffice 或用 SOFFICE_PATH 换过工具后，旧缓存必须
+    # 失效，否则会把 antiword 的旧文本当成新结果复用。
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        p = os.path.join(td, 'a.doc')
+        open(p, 'w').close()
+        saved = m._DOC_CONVERTER
+        try:
+            keys = []
+            for tool in ('/usr/bin/antiword', '/usr/bin/catdoc',
+                         '/usr/bin/soffice', None):
+                m._DOC_CONVERTER = tool
+                keys.append(m._extract_cache_key(p, 0))
+        finally:
+            m._DOC_CONVERTER = saved
+        assert len(set(keys)) == 4, keys
+        # 同一工具换个目录 → 同一把键（缓存不因路径搬家而失效）
+        try:
+            m._DOC_CONVERTER = '/opt/libreoffice/program/soffice'
+            k1 = m._extract_cache_key(p, 0)
+            m._DOC_CONVERTER = '/usr/bin/soffice'
+            k2 = m._extract_cache_key(p, 0)
+        finally:
+            m._DOC_CONVERTER = saved
+        assert k1 == k2, (k1, k2)
+        # 非 .doc 格式不受转换器影响：装/换 LibreOffice 不该作废 pdf/docx 缓存
+        txt = os.path.join(td, 'a.txt')
+        open(txt, 'w').close()
+        try:
+            m._DOC_CONVERTER = '/usr/bin/antiword'
+            k3 = m._extract_cache_key(txt, 0)
+            m._DOC_CONVERTER = '/usr/bin/soffice'
+            k4 = m._extract_cache_key(txt, 0)
+        finally:
+            m._DOC_CONVERTER = saved
+        assert k3 == k4, (k3, k4)
+
+
+# ── Windows 桌面壳（无控制台 + 托盘角标）────────────────────────
+def t_windows_tray_menu_wiring():
+    # 无控制台运行时，托盘角标是唯一的交互入口：菜单必须真的"打开页面/退出"，
+    # 且"退出"要停角标→关服务器→落盘日志→结束进程——只停角标会留下一个看不见
+    # 也停不掉的进程；在线程里 sys.exit() 只结束那个线程，最后必须 os._exit。
+    import types
+    calls = []
+
+    class _Item:
+        def __init__(self, text, action, default=False):
+            self.text, self.action, self.default = text, action, default
+
+    class _Menu:
+        SEPARATOR = '<sep>'
+
+        def __init__(self, *items):
+            self.items = items
+
+    class _Icon:
+        def __init__(self, name, icon=None, title=None, menu=None):
+            self.name, self.image, self.title, self.menu = name, icon, title, menu
+            calls.append('create')
+
+        def run(self):
+            calls.append('run')
+
+        def stop(self):
+            calls.append('stop')
+
+    fake_ps = types.SimpleNamespace(Menu=_Menu, MenuItem=_Item, Icon=_Icon)
+    fake_img = types.SimpleNamespace(open=lambda p: 'IMG:' + p)
+    tray = m._WindowsTray(
+        'http://127.0.0.1:5001', data_dir='/data/dir', icon_path='/tmp/star.ico',
+        stop_server=lambda: calls.append('close-server'),
+        pystray_mod=fake_ps, image_mod=fake_img,
+        open_page=lambda u: calls.append(('open', u)),
+        open_dir=lambda d: calls.append(('dir', d)),
+        exit_fn=lambda code: calls.append(('exit', code)))
+    tray.run()
+    assert calls[0] == 'create' and 'run' in calls, calls
+    assert tray.icon.image == 'IMG:/tmp/star.ico', tray.icon.image
+    assert '127.0.0.1:5001' in tray.icon.title, tray.icon.title
+    items = [i for i in tray.icon.menu.items if isinstance(i, _Item)]
+    assert [i.text for i in items] == ['打开页面', '打开数据目录', '退出星易查'], items
+    assert items[0].default is True, '双击角标必须等于打开页面'
+    items[0].action(tray.icon, items[0])
+    assert ('open', 'http://127.0.0.1:5001') in calls, calls
+    items[1].action(tray.icon, items[1])
+    assert ('dir', '/data/dir') in calls, calls
+    items[2].action(tray.icon, items[2])
+    assert 'stop' in calls and 'close-server' in calls and ('exit', 0) in calls, calls
+
+    # 图标读不出来不能拖垮托盘：退回 pystray 默认图标（image=None）
+    def _boom(_p):
+        raise OSError('bad icon')
+
+    tray2 = m._WindowsTray('u', icon_path='/nope.ico', pystray_mod=fake_ps,
+                           image_mod=types.SimpleNamespace(open=_boom),
+                           open_page=lambda u: None, open_dir=lambda d: None,
+                           exit_fn=lambda c: None)
+    tray2.build()
+    assert tray2.icon.image is None, tray2.icon.image
+
+
+def t_windows_gui_returns_false_without_tray_deps():
+    # 托盘依赖缺失 → 调用方必须得到 False 才能回退可见控制台；
+    # 若这里返回 True，主循环不会跑、进程会静默退出（或更糟：无法停止）。
+    saved = m._load_tray_deps
+    try:
+        m._load_tray_deps = lambda: (None, None)
+        assert m._run_windows_gui('http://x', '127.0.0.1', 5001) is False
+    finally:
+        m._load_tray_deps = saved
+
+
+def t_windows_gui_build_failure_precedes_port_binding():
+    # 托盘初始化失败必须发生在绑定端口之前，否则"回退控制台模式"会撞端口。
+    saved = (m._load_tray_deps, m._WindowsTray, m._make_waitress_server,
+             m._fatal_message)
+    bound = []
+    try:
+        m._load_tray_deps = lambda: ('ps', 'img')
+
+        class _Boom:
+            def __init__(self, *a, **k):
+                pass
+
+            def build(self):
+                raise RuntimeError('no tray')
+
+        m._WindowsTray = _Boom
+        m._make_waitress_server = lambda host, port: bound.append((host, port))
+        m._fatal_message = lambda *a, **k: None
+        assert m._run_windows_gui('http://x', '127.0.0.1', 5001) is False
+        assert not bound, '托盘失败时不该已经绑定端口'
+    finally:
+        (m._load_tray_deps, m._WindowsTray, m._make_waitress_server,
+         m._fatal_message) = saved
+
+
+def t_windows_console_helpers_noop_off_windows():
+    # 非 Windows 宿主上三个 Win32 助手必须是安全空操作（启动路径上都会被调到）
+    if os.name == 'nt':
+        return
+    assert m._attach_parent_console() is False
+    assert m._alloc_console() is False
+    m._fatal_message('不该有对话框')          # 不得抛异常
+    assert m._install_frozen_crash_dialog() is None
+
+
+def t_tray_icon_path_resolves_repo_icon():
+    # 开发态能找到 packaging/star.ico；冻结态由 star.spec 的 datas 放进 _MEIPASS
+    p = m._tray_icon_path()
+    assert p is None or os.path.isfile(p), p
+    repo_ico = os.path.join(m._BASE_DIR, 'packaging', 'star.ico')
+    if os.path.isfile(repo_ico):
+        assert p is not None and p.endswith('star.ico'), p
+
+
 def main():
     # Tests must be hermetic: the extraction cache lives on disk between runs,
     # and a cached PDF extraction silently skips the very code path a test

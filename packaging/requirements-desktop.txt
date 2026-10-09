@@ -2,7 +2,8 @@
 # 与 requirements.txt（Docker 部署）的差异：
 #   - 去掉 gunicorn（Windows/macOS 不可用，桌面版统一用 waitress）
 #   - 增加 waitress（生产级 WSGI 服务器，跨平台）
-#   - 增加 pyinstaller / pillow（仅构建期使用，不进入运行时）
+#   - 增加 pyinstaller / pillow（Windows 上 pillow 还是托盘图标的运行时依赖）
+#   - Windows 增加 pystray（无控制台运行时的托盘角标：打开页面/打开数据目录/退出）
 #   - macOS 增加 pyobjc（.app 需要 Cocoa 事件循环：Dock reopen 回调 + 菜单栏图标）
 flask>=3.0
 python-docx>=1.0
@@ -23,5 +24,6 @@ rapidocr>=2.0; python_version >= "3.13"
 onnxruntime>=1.19; python_version >= "3.13"
 waitress>=3.0
 pyobjc-framework-Cocoa>=10.0; sys_platform == "darwin"
+pystray>=0.19; sys_platform == "win32"
 pyinstaller>=6.6
 pillow>=10.0

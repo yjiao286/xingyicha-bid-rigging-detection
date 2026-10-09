@@ -30,6 +30,13 @@
 > LibreOffice（`brew install --cask libreoffice`，或
 > [官网](https://www.libreoffice.org/) 下载 pkg 安装）。未安装时 `.doc`
 > 正文自动跳过，其元数据比对及全部其他格式、维度不受影响。
+>
+> 从 Finder 双击启动的应用继承的是系统最小 `PATH`（不含 Homebrew 的
+> `/opt/homebrew/bin`），所以程序除 `PATH` 外还会显式探测
+> `/Applications/LibreOffice.app`、`~/Applications/LibreOffice.app` 与
+> Homebrew / `/usr/local` 下的 soffice——**正常安装（官网 pkg 或
+> `brew install --cask`）无需任何额外配置**；装在别处时设
+> `SOFFICE_PATH=/path/to/soffice`（或安装目录、`.app` 包路径）后重启即可。
 
 ## 三、macOS 桌面集成
 
@@ -46,7 +53,7 @@
 |------|------|
 | .docx / .pdf / .txt / .xlsx / 扫描件 OCR | ✅ 完整支持 |
 | .doc 元数据比对 | ✅ 完整支持 |
-| .doc 正文 | ⚠️ 需安装 LibreOffice（`brew install --cask libreoffice` 或官网下载），未装时自动跳过，其余不受影响 |
+| .doc 正文 | ⚠️ 需安装 LibreOffice（`brew install --cask libreoffice` 或官网下载，任意安装位置均可识别），未装时自动跳过，其余不受影响 |
 
 数据目录：`~/Library/Application Support/星易查/`（history 与 uploads）。
 

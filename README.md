@@ -57,7 +57,7 @@
 
 桌面版免 Python、免命令行。到
 [Releases 页面](https://github.com/yjiao286/xingyicha-bid-rigging-detection/releases)
-（当前最新 [v2.3.0](https://github.com/yjiao286/xingyicha-bid-rigging-detection/releases/tag/v2.3.0)）
+（当前最新 [v2.4.0](https://github.com/yjiao286/xingyicha-bid-rigging-detection/releases/tag/v2.4.0)）
 按操作系统下载对应附件：
 
 | 操作系统 / 环境 | 下载文件 | 安装方式 | 详细指南 |
@@ -71,12 +71,18 @@
 | **银河麒麟 V10（aarch64：飞腾/鲲鹏/麒麟990）** | 暂无预编译产物 → 源码部署 | 麒麟指南第六节 | [银河麒麟部署.md](docs/银河麒麟部署.md) |
 | 服务器（任意系统） | 源码 + Docker | `docker compose up -d --build` | 仓库根目录 `docker-compose.yml` |
 
-**通用说明**：桌面版启动后自动打开浏览器访问 `http://127.0.0.1:5001`，关闭
-终端/控制台窗口即停止服务；端口占用时自动改用 5002-5010。`.docx` / `.pdf` /
+**通用说明**：桌面版启动后自动打开浏览器访问 `http://127.0.0.1:5001`；
+**Windows 版不再弹出控制台窗口**——右下角托盘角标就是程序本体（打开页面 /
+打开数据目录 / 退出，双击角标=重新打开页面），关掉浏览器不会停止后台服务，
+再双击一次桌面图标即可重新拉起；Linux 便携版仍保留控制台窗口（关窗即停服）；
+端口占用时自动改用 5002-5010。`.docx` / `.pdf` /
 `.txt` / `.xlsx` / 扫描件 OCR 均开箱即用；仅老格式 `.doc` 的**正文提取**需
 系统另装 LibreOffice（免费）：Windows/macOS [官网下载](https://www.libreoffice.org/)、
 macOS 亦可 `brew install --cask libreoffice`、Linux/麒麟 `sudo apt install
 libreoffice`。未安装时该维度自动跳过（`.doc` 元数据比对仍可用），其余不受影响。
+LibreOffice **装在任意目录都能被识别**（PATH、各平台常见安装位置、Windows
+注册表，macOS 另含 `/Applications/LibreOffice.app` 与 Homebrew）；仍识别不到
+时用环境变量 `SOFFICE_PATH` 指定，启动日志与 `--check` 会打印实际识别的路径。
 
 选机/采购前请先看 [硬件配置要求](docs/硬件配置要求.md)：OCR 为纯 CPU
 推理、无需显卡，内存是第一约束——最低 2 核 / 4GB，推荐 4 核 / 8GB 起。

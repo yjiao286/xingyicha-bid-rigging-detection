@@ -34,6 +34,16 @@ hiddenimports = ['waitress', 'cv2', 'fitz', 'onnxruntime']
 if ON_MACOS:
     # app.py 冻结入口用 AppKit 跑 Cocoa 事件循环（Dock reopen / 菜单栏）
     hiddenimports += ['AppKit', 'Foundation']
+if ON_WINDOWS:
+    # 托盘角标（app.py _WindowsTray）：pystray 在 Windows 上是纯 ctypes 实现，
+    # 后端模块由 importlib 动态加载——静态分析发现不了，必须显式声明；图标经
+    # Pillow 转成 HICON，故 PIL 也要收进来。
+    hiddenimports += ['pystray', 'pystray._win32', 'PIL', 'PIL.Image',
+                      'PIL.ImageDraw']
+    _tray_ico = os.path.join(SPECPATH, 'star.ico')
+    if os.path.exists(_tray_ico):
+        # 运行时托盘图标：app.py _tray_icon_path() 从 _MEIPASS 里找它
+        datas += [(_tray_ico, '.')]
 
 # OCR 引擎两个发行包二选一：py<3.13 → rapidocr_onnxruntime；py>=3.13 →
 # rapidocr（+onnxruntime）。两者都把 ONNX 模型与 YAML 配置作为 package
@@ -89,7 +99,7 @@ if ON_MACOS:
         bootloader_ignore_signals=False,
         strip=False,
         upx=False,
-        console=True,  # Windows/Linux：控制台窗口看进度，关窗即停服；macOS Finder 启动无窗口，交互走 Cocoa 图形层（app.py _run_macos_gui）
+        console=True,  # macOS Finder 启动无窗口，交互走 Cocoa 图形层（app.py _run_macos_gui）；console 仅影响启动方式，不影响行为
         icon=os.path.join(SPECPATH, 'star.icns') if os.path.exists(os.path.join(SPECPATH, 'star.icns')) else None,
     )
     coll = COLLECT(
@@ -108,7 +118,7 @@ if ON_MACOS:
         info_plist={
             'CFBundleDisplayName': '星易查',
             'CFBundleName': NAME,
-            'CFBundleShortVersionString': '2.3.0',
+            'CFBundleShortVersionString': '2.4.0',
             'NSHighResolutionCapable': True,
             # onnxruntime>=1.19 的 macOS x86_64 wheel 最低要求 10.15，
             # 标低了会在 10.13/10.14 上启动即 import 失败（OCR 降级）。
@@ -126,7 +136,9 @@ else:
         bootloader_ignore_signals=False,
         strip=False,
         upx=False,
-        console=True,  # 保留控制台窗口：看分析进度，关闭窗口即停止服务
+        # Windows：无控制台（console=False）+ 托盘角标（app.py _run_windows_gui），
+        # 用户关掉浏览器也不会牵连服务；Linux：保留控制台窗口看进度，关窗即停服。
+        console=not ON_WINDOWS,
         icon=os.path.join(SPECPATH, 'star.ico') if ON_WINDOWS and os.path.exists(os.path.join(SPECPATH, 'star.ico')) else None,
     )
     coll = COLLECT(

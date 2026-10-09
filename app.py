@@ -3,6 +3,7 @@ import sys
 import re
 import json
 import base64
+import glob
 import zipfile
 import subprocess
 import tempfile
@@ -12,6 +13,10 @@ import logging
 import uuid
 import time
 import multiprocessing
+# ntpath/posixpath are referenced explicitly (not os.path) by the cross-OS
+# soffice probe lists, so Windows path shapes stay correct/testable on any host.
+import ntpath
+import posixpath
 from io import BytesIO
 from pathlib import Path
 from datetime import datetime
@@ -33,7 +38,7 @@ import threading
 #   - 前端 footer 版本标注与静态资源缓存参数（?v=）由模板渲染注入；
 #   - 桌面版 Release 产物文件名后缀、Inno Setup 安装器版本由 CI 从此处
 #     读取（desktop-build.yml「Derive version from app.py」）。
-APP_VERSION = '2.3.0'
+APP_VERSION = '2.4.0'
 
 # ── Frozen (PyInstaller) detection ──────────────────────────────
 # When bundled as a desktop exe, templates/static live inside the bundle
@@ -146,6 +151,25 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 HISTORY_DIR = os.environ.get('HISTORY_DIR') or os.path.join(_DATA_DIR, 'history')
 os.makedirs(HISTORY_DIR, exist_ok=True)
 
+# Desktop build: log to a file under the data dir as well. The Windows build
+# runs without a console (star.spec console=False) and a Finder-launched macOS
+# build has no terminal either, so this file is the only artefact a support
+# report can point at. Rotating — a long-lived install must not fill the disk.
+_LOG_PATH = None
+if IS_FROZEN:
+    try:
+        from logging.handlers import RotatingFileHandler
+        _log_dir = os.path.join(_DATA_DIR, 'logs')
+        os.makedirs(_log_dir, exist_ok=True)
+        _LOG_PATH = os.path.join(_log_dir, 'xingyicha.log')
+        _fh = RotatingFileHandler(_LOG_PATH, maxBytes=2 * 1024 * 1024,
+                                  backupCount=3, encoding='utf-8')
+        _fh.setFormatter(logging.Formatter(
+            '%(asctime)s %(levelname)s [%(name)s] %(message)s'))
+        logging.getLogger().addHandler(_fh)   # root：waitress 等也一并落盘
+    except Exception:
+        _LOG_PATH = None
+
 # ── Cancellation ─────────────────────────────────────────────────
 class AnalysisCancelled(Exception):
     """Raised inside extraction/analysis threads when the user cancels.
@@ -201,22 +225,218 @@ def sanitize_text(text):
     return re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]', '', text)
 
 def _find_tool(*names):
-    """Find first available command-line tool.
-
-    Returns the executable's full path (shutil.which resolves names on PATH;
-    on Windows LibreOffice is never on PATH so we probe the standard install
-    locations - the full path also works in subprocess calls on every
-    platform)."""
-    candidates = list(names)
-    if os.name == 'nt':
-        for progdir in (os.environ.get('PROGRAMFILES', r'C:\Program Files'),
-                        os.environ.get('ProgramFiles(x86)', r'C:\Program Files (x86)')):
-            candidates.append(os.path.join(progdir, 'LibreOffice', 'program', 'soffice.exe'))
-    for name in candidates:
+    """Full path of the first of `names` found on PATH (None if none)."""
+    for name in names:
         path = shutil.which(name)
         if path:
             return path
     return None
+
+
+# Explicit override environment variables for the .doc converter, most
+# specific first.
+_SOFFICE_ENV_VARS = ('SOFFICE_PATH', 'LIBREOFFICE_PATH')
+
+
+def _is_usable_executable(path):
+    """True only for something we can actually launch: absolute, existing and
+    executable. Explicit overrides go through this — latching onto a data file,
+    or onto a relative path resolved against an unpredictable CWD (which is
+    what a desktop shortcut gives), would turn "I set SOFFICE_PATH" into silent
+    .doc text loss, the exact symptom the discovery chain exists to remove."""
+    if not path or not os.path.isabs(path) or not os.path.isfile(path):
+        return False
+    if os.name == 'nt':
+        # Windows has no X_OK; PATHEXT decides what is launchable.
+        return os.path.splitext(path)[1].lower() in ('.exe', '.bat', '.cmd', '.com')
+    return os.access(path, os.X_OK)
+
+
+def _first_file(paths):
+    """First existing file among `paths`; glob patterns (`*`/`?`) are expanded
+    (sorted, so versioned directories resolve deterministically)."""
+    for p in paths:
+        if not p:
+            continue
+        hits = sorted(glob.glob(p)) if ('*' in p or '?' in p) else [p]
+        for hit in hits:
+            if os.path.isfile(hit):
+                return hit
+    return None
+
+
+def _soffice_probe_paths(osname=None, env=None):
+    """Known soffice locations for an OS family, in probe order.
+
+    Pure data (no filesystem access) so every branch stays unit-testable from
+    any dev machine. `osname` defaults to the current platform: 'nt' /
+    'darwin' / 'posix' (Linux, Kylin, BSD, Docker images).
+    """
+    if osname is None:
+        osname = 'darwin' if sys.platform == 'darwin' else os.name
+    env = os.environ if env is None else env
+
+    if osname == 'nt':
+        # Official installer defaults + per-user/portable layouts. The glob
+        # covers versioned or renamed install dirs ('LibreOffice 7',
+        # 'LibreOffice 24'), and %LOCALAPPDATA% the per-user copies that the
+        # machine-wide roots never see.
+        roots = [env.get('PROGRAMFILES') or r'C:\Program Files',
+                 env.get('ProgramFiles(x86)') or r'C:\Program Files (x86)']
+        local = env.get('LOCALAPPDATA')
+        if local:
+            roots += [local, ntpath.join(local, 'Programs')]
+        # glob.escape: 形如 'D:\Program Files [x64]' 的根目录会被当成字符类，
+        # 使 glob 静默匹配不到（旧的 os.path.join+isfile 没这个问题）。
+        return [ntpath.join(glob.escape(root), 'LibreOffice*', 'program',
+                            'soffice.exe') for root in roots]
+
+    if osname == 'darwin':
+        # A double-clicked .app inherits launchd's minimal PATH
+        # (/usr/bin:/bin:/usr/sbin:/sbin): Homebrew's bin dirs are NOT on it,
+        # so the bundle path and the Homebrew prefixes must be probed
+        # explicitly, or a Finder-launched desktop build misses the very
+        # LibreOffice that works in the user's own terminal.
+        return [
+            '/Applications/LibreOffice.app/Contents/MacOS/soffice',
+            posixpath.join(os.path.expanduser('~'), 'Applications',
+                           'LibreOffice.app', 'Contents', 'MacOS', 'soffice'),
+            '/opt/homebrew/bin/soffice',      # Apple Silicon Homebrew
+            '/usr/local/bin/soffice',         # Intel Homebrew / manual install
+            '/usr/bin/soffice',
+        ]
+
+    return [
+        '/usr/bin/soffice',                       # apt/yum/zypper/dnf, Kylin
+        '/usr/local/bin/soffice',
+        '/usr/bin/libreoffice',
+        '/usr/lib/libreoffice/program/soffice',   # distro package layout
+        '/snap/bin/libreoffice',
+        '/opt/libreoffice*/program/soffice',      # upstream .tar.gz install
+        posixpath.join(glob.escape(os.path.expanduser('~')),
+                       'libreoffice*/program/soffice'),
+    ]
+
+
+def _text_tool_probe_paths(osname=None, env=None):
+    """Known antiword/catdoc locations (same minimal-PATH problem as soffice
+    for a Finder/desktop-launched build)."""
+    if osname is None:
+        osname = 'darwin' if sys.platform == 'darwin' else os.name
+    if osname == 'nt':
+        return []                    # antiword/catdoc are not a Windows thing
+    if osname == 'darwin':
+        dirs = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin']
+    else:
+        dirs = ['/usr/bin', '/usr/local/bin']
+    return ([posixpath.join(d, 'antiword') for d in dirs]
+            + [posixpath.join(d, 'catdoc') for d in dirs])
+
+
+def _soffice_from_env(env=None):
+    """Explicit override: SOFFICE_PATH (alias LIBREOFFICE_PATH) may point at
+    soffice(.exe) itself, the install root, the `program` dir, or a macOS
+    LibreOffice.app bundle — and at a wrapper script too (flatpak/container
+    shims). The value must resolve to an *executable* file (absolute path; on
+    POSIX also +x): anything else — a data file, a relative path, a stale
+    location — logs a warning and falls through to auto-detection, so a stale
+    variable cannot silently blank out .doc extraction."""
+    env = os.environ if env is None else env
+    for var in _SOFFICE_ENV_VARS:
+        raw = (env.get(var) or '').strip().strip('"').strip("'")
+        if not raw:
+            continue
+        # %VAR% 展开：Windows 用户常从「属性」里复制 %ProgramFiles%\... 形态
+        base = os.path.expandvars(os.path.expanduser(raw))
+        for cand in (base,
+                     os.path.join(base, 'soffice.exe'),
+                     os.path.join(base, 'program', 'soffice.exe'),
+                     os.path.join(base, 'program', 'soffice'),
+                     os.path.join(base, 'Contents', 'MacOS', 'soffice'),
+                     os.path.join(base, 'LibreOffice.app', 'Contents',
+                                  'MacOS', 'soffice')):
+            if _is_usable_executable(cand):
+                return cand
+        logger.warning('%s=%s 不是可执行文件（需绝对路径且可执行），改用自动探测',
+                       var, raw)
+    return None
+
+
+def _soffice_from_registry(osname=None, winreg_mod=None):
+    """Windows: LibreOffice records its install path under
+    HKLM/HKCU\\SOFTWARE\\LibreOffice\\UNO\\InstallPath. That is the only way to
+    find a custom install dir (D:\\LibreOffice, a per-user copy) which no path
+    probing can guess — the installer stores it there no matter which directory
+    the user picked. The value name differs across versions (default value /
+    'Path' / 'InstallPath') and a 32-bit LibreOffice on 64-bit Windows lives in
+    the WOW6432Node view, so every value in both views is tried. Never raises:
+    this runs at import time in every process.
+
+    `osname`/`winreg_mod` are injectable only so the branch stays testable on
+    non-Windows hosts; production callers pass nothing.
+    """
+    if (osname or os.name) != 'nt':
+        return None
+    if winreg_mod is None:
+        try:
+            import winreg as winreg_mod
+        except Exception:
+            return None
+    subkey = r'SOFTWARE\LibreOffice\UNO\InstallPath'
+    for root in (winreg_mod.HKEY_LOCAL_MACHINE, winreg_mod.HKEY_CURRENT_USER):
+        for view in (winreg_mod.KEY_WOW64_64KEY, winreg_mod.KEY_WOW64_32KEY):
+            try:
+                key = winreg_mod.OpenKey(root, subkey, 0,
+                                         winreg_mod.KEY_READ | view)
+            except OSError:
+                continue
+            try:
+                values = []
+                try:
+                    values.append(winreg_mod.QueryValueEx(key, '')[0])
+                except OSError:
+                    pass
+                i = 0
+                while True:
+                    try:
+                        values.append(winreg_mod.EnumValue(key, i)[1])
+                    except OSError:
+                        break
+                    i += 1
+            finally:
+                key.Close()
+            for val in values:
+                if not isinstance(val, str) or not val.strip():
+                    continue
+                base = val.strip().strip('"')
+                hit = _first_file([base,
+                                   os.path.join(base, 'soffice.exe'),
+                                   os.path.join(base, 'program', 'soffice.exe')])
+                if hit:
+                    return hit
+    return None
+
+
+def _resolve_doc_converter():
+    """Resolve the .doc text converter path (or None).
+
+    Precedence: SOFFICE_PATH/LIBREOFFICE_PATH → PATH → per-OS known install
+    locations → Windows registry → antiword/catdoc. LibreOffice is preferred
+    (table-aware .docx conversion; the documented 优先项), the text-only tools
+    act only as fallback. Resolved once at import — a converter installed or
+    re-pointed afterwards takes effect after restarting the app.
+    """
+    hit = _soffice_from_env()
+    if hit:
+        return hit
+    hit = _find_tool('libreoffice', 'soffice') or _first_file(_soffice_probe_paths())
+    if hit:
+        return hit
+    if os.name == 'nt':
+        hit = _soffice_from_registry()
+        if hit:
+            return hit
+    return _find_tool('antiword', 'catdoc') or _first_file(_text_tool_probe_paths())
 
 
 # ── Match normalization (shared by similarity / template index / frontend) ──
@@ -373,17 +593,29 @@ def _is_within_upload_folder(path):
         return False
 
 # ── .doc Conversion ─────────────────────────────────────────────
-_DOC_CONVERTER = _find_tool('libreoffice', 'soffice', 'antiword', 'catdoc')
+# Resolved once at import: SOFFICE_PATH/LIBREOFFICE_PATH → PATH → per-OS known
+# install locations → Windows registry → antiword/catdoc (see
+# _resolve_doc_converter for the full rationale).
+_DOC_CONVERTER = _resolve_doc_converter()
+# 兜底文本工具：LibreOffice 选中但转换失败时用（见 extract_doc_text_raw）
+_DOC_TEXT_FALLBACK = (_find_tool('antiword', 'catdoc')
+                      or _first_file(_text_tool_probe_paths()))
+# 本次提取是否走了兜底通道 —— 缓存层据此跳过写入（见 extract_text_with_pages）
+_DOC_USED_FALLBACK = False
+logger.info('.doc 正文转换器: %s',
+            _DOC_CONVERTER or '未检测到（.doc 正文将跳过；可装 LibreOffice 或用 SOFFICE_PATH 指定）')
 
 
-def _doc_converter_kind():
-    """Classify the resolved _DOC_CONVERTER path: 'antiword' | 'catdoc' |
-    'libreoffice' | None. _DOC_CONVERTER may be a full path (Windows
-    soffice.exe), so matching on the basename keeps the old command-name
-    semantics working."""
-    if not _DOC_CONVERTER:
+def _doc_converter_kind(tool=None):
+    """Classify a converter path (default: the resolved _DOC_CONVERTER):
+    'antiword' | 'catdoc' | 'libreoffice' | None. The path may be a full one
+    (Windows soffice.exe, macOS LibreOffice.app bundle, wrapper script), so
+    matching on the basename keeps the old command-name semantics working.
+    Both separators are honoured, so the classification is host-independent."""
+    tool = _DOC_CONVERTER if tool is None else tool
+    if not tool:
         return None
-    base = os.path.basename(_DOC_CONVERTER).lower()
+    base = re.split(r'[\\/]', str(tool))[-1].lower()
     if base.startswith('antiword'):
         return 'antiword'
     if base.startswith('catdoc'):
@@ -448,8 +680,31 @@ def convert_doc_to_docx(filepath):
             _DOCX_CACHE[filepath] = (mtime, docx_path)
     return docx_path
 
+def _extract_with_text_tool(tool, filepath):
+    """Text-only antiword/catdoc channel (stdout, no tables). None on failure."""
+    if not tool:
+        return None
+    try:
+        result = subprocess.run([tool, filepath], capture_output=True,
+                                text=True, timeout=30)
+        if result.returncode == 0:
+            return result.stdout.strip() or None
+    except Exception as e:
+        logger.warning('%s 读取 .doc 失败: %s', os.path.basename(tool), e)
+    return None
+
+
 def extract_doc_text_raw(filepath):
-    """Extract text from .doc using antiword, catdoc or LibreOffice"""
+    """Extract text from .doc: LibreOffice (preferred, tables included), else
+    the text-only antiword/catdoc fallback.
+
+    Sets _DOC_USED_FALLBACK when the text came from that fallback so the cache
+    wrapper can skip storing it — fallback output depends on the *runtime*
+    health of the LibreOffice install rather than on anything baked into the
+    cache key, so caching it would later shadow a repaired LibreOffice with
+    antiword text for the same bytes."""
+    global _DOC_USED_FALLBACK
+    _DOC_USED_FALLBACK = False
     tool = _DOC_CONVERTER
     if not tool:
         return None
@@ -457,16 +712,25 @@ def extract_doc_text_raw(filepath):
 
     try:
         if kind in ('antiword', 'catdoc'):
-            result = subprocess.run([tool, filepath], capture_output=True, text=True, timeout=30)
-            if result.returncode == 0:
-                return result.stdout.strip()
-        else:
-            # Convert .doc -> .docx first (cached: no repeat LibreOffice launch)
-            docx_path = convert_doc_to_docx(filepath)
-            if docx_path:
-                doc = Document(docx_path)
-                lines = [p.text for p in doc.paragraphs]
-                return '\n'.join(lines)
+            return _extract_with_text_tool(tool, filepath)
+        # Convert .doc -> .docx first (cached: no repeat LibreOffice launch)
+        docx_path = convert_doc_to_docx(filepath)
+        text = ''
+        if docx_path:
+            doc = Document(docx_path)
+            text = '\n'.join(p.text for p in doc.paragraphs)
+        if text.strip():
+            return text
+        # LibreOffice 找到了却转换不出内容（残缺/绿色版安装、snap/包装器、
+        # 权限被回收）：退回只读文本的 antiword/catdoc——丢表格，但正文还在，
+        # 总好过让相似度/人员/报价/混装几个维度全部看到空文档。
+        fallback_text = _extract_with_text_tool(_DOC_TEXT_FALLBACK, filepath)
+        if fallback_text:
+            _DOC_USED_FALLBACK = True
+            logger.info('LibreOffice 转换无输出，已用 %s 读取 .doc 正文: %s',
+                        os.path.basename(_DOC_TEXT_FALLBACK),
+                        os.path.basename(filepath))
+        return fallback_text
     except Exception as e:
         logger.warning('.doc text extraction failed for %s: %s', filepath, e)
     return None
@@ -1233,10 +1497,18 @@ def _extract_cache_key(filepath, max_pages):
     collision risk to save it.
     """
     h = hashlib.sha256()
+    # The .doc converter kind belongs in the key: antiword/catdoc emit plain
+    # text while LibreOffice converts to .docx (tables included), so the same
+    # bytes yield different text after a tool is installed or re-pointed via
+    # SOFFICE_PATH. Only the kind (not the path) — moving the same tool to
+    # another directory must not invalidate the cache. Only for .doc: mixing it
+    # into every format's key would discard cached pdf/docx/xlsx/txt results
+    # whenever a converter is installed, for no benefit.
+    kind = (_doc_converter_kind() or '') if filepath.lower().endswith('.doc') else ''
     h.update(f'{_EXTRACT_CACHE_VERSION}|{max_pages}|{MAX_PDF_TABLE_PAGES}'
              f'|{PDF_TABLE_LAYOUT}|{OCR_TIME_BUDGET}|{OCR_MAX_PAGES}'
              f'|{DOCX_IMAGE_OCR}|{DOCX_IMAGE_OCR_MAX}'
-             f'|{DOCX_IMAGE_OCR_MAX_SIDE}|'.encode())
+             f'|{DOCX_IMAGE_OCR_MAX_SIDE}|{kind}|'.encode())
     with open(filepath, 'rb') as f:
         for chunk in iter(lambda: f.read(1 << 20), b''):
             h.update(chunk)
@@ -1612,10 +1884,14 @@ def extract_text_with_pages(filepath, max_pages=MAX_PDF_PAGES, on_progress=None,
         if cached is not None:
             logger.debug('提取缓存命中: %s', os.path.basename(filepath))
             return cached
+    global _DOC_USED_FALLBACK
+    _DOC_USED_FALLBACK = False      # 按文件重新判定（上一份的结论不能外溢）
     result = _extract_text_uncached(filepath, max_pages=max_pages,
                                     on_progress=on_progress,
                                     cancel_event=cancel_event)
-    if key is not None and result[0]:
+    # 走了 antiword/catdoc 兜底的 .doc 文本不入缓存：它取决于运行期
+    # LibreOffice 是否可用，而缓存键只记录配置与工具种类。
+    if key is not None and result[0] and not _DOC_USED_FALLBACK:
         _extract_cache_write(key, result[0], result[1])
     return result
 
@@ -9439,6 +9715,271 @@ def _probe_own_instance(preferred_port, span=10):
     return None
 
 
+# ── Windows 桌面壳（隐藏控制台 + 托盘角标）───────────────────────
+# Windows 版以无控制台方式构建（star.spec console=False）：没有窗口，也就没有
+# "关掉窗口=停服"的耦合，但必须给出别样的存在形式与交互入口——托盘角标：
+#   双击角标 / 菜单"打开页面" → 打开前端
+#   菜单"打开数据目录"         → %LOCALAPPDATA%\星易查（历史、上传、日志）
+#   菜单"退出星易查"           → 停角标 → 关 waitress → 日志落盘 → 结束进程
+# 与 macOS 的 Dock 图标 + 菜单栏行为对齐：再次双击 exe 会命中单实例探测
+# （_probe_own_instance），直接把已在运行的那一份页面拉起来。
+_TRAY_OPEN = '打开页面'
+_TRAY_DATA = '打开数据目录'
+_TRAY_QUIT = '退出星易查'
+
+
+def _fatal_message(text, title='星易查'):
+    """Best-effort native message box (frozen builds may have no console)."""
+    if os.name != 'nt':
+        return
+    try:
+        import ctypes
+        ctypes.windll.user32.MessageBoxW(None, str(text), str(title), 0x10)
+    except Exception:
+        pass
+
+
+def _reopen_console_streams():
+    """Point stdout/stderr at this process's console (after Attach/Alloc)."""
+    try:
+        sys.stdout = open('CONOUT$', 'w', encoding='utf-8', errors='replace',
+                          buffering=1)
+        sys.stderr = open('CONOUT$', 'w', encoding='utf-8', errors='replace',
+                          buffering=1)
+        return True
+    except Exception:
+        return False
+
+
+def _attach_parent_console():
+    """Windowed frozen build (console=False): `星易查.exe --check` run from a
+    terminal should print there. Only the *parent* console is ever attached,
+    and only for diagnostics — never a fresh one, because a console the user
+    can close would reintroduce "close the window, lose the app"."""
+    if os.name != 'nt' or sys.stdout is not None:
+        return False
+    try:
+        import ctypes
+        if not ctypes.windll.kernel32.AttachConsole(-1):   # ATTACH_PARENT_PROCESS
+            return False
+        return _reopen_console_streams()
+    except Exception:
+        return False
+
+
+def _alloc_console():
+    """Last-resort fallback when the tray cannot start: give the user a visible
+    window back (closing it stops the app — the old, understood behaviour)
+    instead of leaving an invisible process they cannot stop."""
+    if os.name != 'nt' or sys.stdout is not None:
+        return False
+    try:
+        import ctypes
+        if not ctypes.windll.kernel32.AllocConsole():
+            return False
+        return _reopen_console_streams()
+    except Exception:
+        return False
+
+
+def _open_path_in_file_manager(path):
+    """Open a directory in the OS file manager (tray menu)."""
+    if not path:
+        return
+    try:
+        if os.name == 'nt':
+            os.startfile(path)
+        elif sys.platform == 'darwin':
+            subprocess.Popen(['open', path])
+        else:
+            subprocess.Popen(['xdg-open', path])
+    except Exception:
+        logger.warning('打开目录失败: %s', path, exc_info=True)
+
+
+def _load_tray_deps():
+    """Import the tray stack lazily (Windows-only runtime path). Returns
+    (pystray, PIL.Image) or (None, None) — never raises."""
+    try:
+        import pystray
+        from PIL import Image
+        return pystray, Image
+    except Exception as exc:
+        logger.warning('托盘依赖不可用（pystray/Pillow）: %s', exc)
+        return None, None
+
+
+def _tray_icon_path():
+    """Bundled tray icon: star.ico ships next to the exe (PyInstaller datas)."""
+    for cand in (os.path.join(_RESOURCE_DIR, 'star.ico'),
+                 os.path.join(_BASE_DIR, 'star.ico'),
+                 os.path.join(_BASE_DIR, 'packaging', 'star.ico')):
+        if os.path.isfile(cand):
+            return cand
+    return None
+
+
+class _WindowsTray:
+    """托盘角标控制器：构造依赖全部可注入，便于在非 Windows 宿主上回归。
+
+    "退出"必须是四件事——停角标 → 关服务器 → 日志落盘 → 结束进程。只停角标会
+    留下一个看不见也停不掉的进程；而在线程里 `sys.exit()` 只结束那个线程，所以
+    最后一步必须走 os._exit。
+    """
+
+    def __init__(self, url, *, data_dir=None, icon_path=None, stop_server=None,
+                 pystray_mod=None, image_mod=None, open_page=None, open_dir=None,
+                 exit_fn=None):
+        self.url = url
+        self.data_dir = data_dir
+        self.icon_path = icon_path
+        self._stop_server = stop_server
+        self._pystray = pystray_mod
+        self._image_mod = image_mod
+        self._open_page = open_page or _open_page
+        self._open_dir = open_dir or _open_path_in_file_manager
+        self._exit = exit_fn or os._exit
+        self.icon = None
+
+    @property
+    def title(self):
+        return f'星易查 · 围串标风险识别（{self.url}）'
+
+    def set_stop_server(self, stop_server):
+        """waitress 句柄在托盘构造之后才存在（先建托盘，托盘不可用时不占端口）。"""
+        self._stop_server = stop_server
+
+    def _image(self):
+        if self.icon_path and self._image_mod is not None:
+            try:
+                return self._image_mod.open(self.icon_path)
+            except Exception:
+                logger.warning('托盘图标加载失败，改用默认图标: %s',
+                               self.icon_path, exc_info=True)
+        return None                      # pystray 自带默认图标
+
+    def build(self):
+        ps = self._pystray
+        menu = ps.Menu(
+            ps.MenuItem(_TRAY_OPEN, self.on_open, default=True),
+            ps.MenuItem(_TRAY_DATA, self.on_open_data_dir),
+            ps.Menu.SEPARATOR,
+            ps.MenuItem(_TRAY_QUIT, self.on_quit),
+        )
+        self.icon = ps.Icon('星易查', icon=self._image(), title=self.title,
+                            menu=menu)
+        return self.icon
+
+    def on_open(self, icon=None, item=None):
+        logger.info('托盘：打开页面 %s', self.url)
+        self._open_page(self.url)
+
+    def on_open_data_dir(self, icon=None, item=None):
+        self._open_dir(self.data_dir)
+
+    def on_quit(self, icon=None, item=None):
+        logger.info('托盘：退出星易查')
+        try:
+            if self.icon is not None:
+                self.icon.stop()
+        except Exception:
+            logger.warning('停止托盘图标失败', exc_info=True)
+        try:
+            if self._stop_server:
+                self._stop_server()
+        except Exception:
+            logger.warning('停止服务器失败', exc_info=True)
+        try:
+            logging.shutdown()           # 无控制台时日志是唯一排障入口
+        except Exception:
+            pass
+        self._exit(0)
+
+    def run(self):
+        self.build()
+        self.icon.run()                  # 阻塞：Windows 消息循环占住主线程
+
+
+def _serve_forever(server):
+    """`server.run()` 的包装：托盘"退出"用 close() 关服务器时，run() 会从
+    select 上抛 EBADF/OSError —— 那是正常退出路径，不是故障（实测 waitress
+    在另一线程 close() 后 run() 立即返回）。"""
+    try:
+        server.run()
+    except Exception as exc:
+        logger.info('waitress 已停止: %s', exc)
+
+
+def _make_waitress_server(host, port):
+    """waitress 服务器对象（不是 serve()）：托盘"退出"需要一个能关掉的句柄。"""
+    from waitress.server import create_server
+    return create_server(app, host=host, port=port, threads=8,
+                         max_request_body_size=_waitress_max_body_bytes,
+                         channel_timeout=_waitress_channel_timeout)
+
+
+def _run_windows_gui(url, host, port):
+    """Frozen Windows entry: serve from a daemon thread, own the main thread
+    with the tray icon (star.spec builds Windows without a console window).
+
+    Returns True once the user quit from the tray. Returns False when the tray
+    is unavailable *before* anything was started, so the caller can fall back
+    to a visible console instead of leaving an unstoppable process."""
+    pystray_mod, image_mod = _load_tray_deps()
+    if pystray_mod is None or image_mod is None:
+        return False
+    tray = _WindowsTray(url, data_dir=_DATA_DIR, icon_path=_tray_icon_path(),
+                        pystray_mod=pystray_mod, image_mod=image_mod)
+    try:
+        tray.build()                     # 失败必须发生在占用端口之前
+    except Exception as exc:
+        logger.exception('托盘初始化失败')
+        _fatal_message(f'星易查托盘初始化失败：{exc}\n将回退到控制台窗口模式。')
+        return False
+    server = None
+    try:
+        server = _make_waitress_server(host, port)
+        tray.set_stop_server(server.close)
+        threading.Thread(target=_serve_forever, args=(server,), name='waitress',
+                         daemon=True).start()
+        logger.info('托盘模式已启动: %s', url)
+        tray.run()
+    except Exception as exc:
+        logger.exception('托盘运行失败，回退控制台窗口模式')
+        _fatal_message(f'星易查托盘运行失败：{exc}\n将回退到控制台窗口模式。')
+        try:
+            if server is not None:
+                server.close()
+        except Exception:
+            pass
+        return False
+    return True
+
+
+def _install_frozen_crash_dialog():
+    """Windowed build: an uncaught exception would otherwise vanish silently."""
+    if not (IS_FROZEN and os.name == 'nt'):
+        return
+
+    def _hook(exc_type, exc, tb):
+        try:
+            logger.error('未捕获异常，进程即将退出', exc_info=(exc_type, exc, tb))
+            logging.shutdown()
+        except Exception:
+            pass
+        where = f'\n\n日志：{_LOG_PATH}' if _LOG_PATH else ''
+        _fatal_message(f'星易查发生未恢复的错误：{exc_type.__name__}: {exc}{where}')
+
+    def _thread_hook(args):
+        # 只记日志、不弹框：后台线程（waitress/提取）出问题的频率可能很高，
+        # 弹框会变成骚扰；但静默同样不行，日志是唯一线索。
+        logger.error('线程 %s 未捕获异常', getattr(args.thread, 'name', '?'),
+                     exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
+
+    sys.excepthook = _hook
+    threading.excepthook = _thread_hook
+
+
 def _run_macos_gui(url, host, port):
     """Frozen macOS entry: own the main thread with a minimal Cocoa app.
 
@@ -9514,7 +10055,10 @@ if __name__ == '__main__':
     # re-launch into a worker instead of a second server. Without it a frozen
     # build would recursively start servers until it runs out of memory.
     multiprocessing.freeze_support()
+    # 无控制台构建：未捕获异常会静默消失，至少弹框告知日志位置
+    _install_frozen_crash_dialog()
     if '--check' in sys.argv:
+        _attach_parent_console()      # 从终端跑 --check 时把输出接回那个终端
         # 离线自检：验证关键依赖可正常导入（用于便携包目标机校验）
         import flask  # noqa: F401
         import docx  # noqa: F401
@@ -9526,6 +10070,14 @@ if __name__ == '__main__':
         from docx import Document
         from pypdf import PdfReader
         print('OK: 所有关键模块可正常导入')
+        # .doc 正文转换器（LibreOffice 优先）：装没装、装在哪，目标机上最需要
+        # 一眼看到——未检测到时 .doc 正文会静默变空，只表现为"未提取到文本"。
+        if _DOC_CONVERTER:
+            print(f'OK: .doc 正文转换器: {_DOC_CONVERTER}')
+        else:
+            print('WARN: 未检测到 .doc 正文转换器（LibreOffice/antiword/catdoc）——'
+                  '.doc 正文将跳过；可安装 LibreOffice，或用 SOFFICE_PATH 指定 '
+                  'soffice 可执行文件/安装目录后重启')
         # 并行提取靠 spawn 进程池：冻结版里若 freeze_support() 没生效、或
         # worker 函数跨进程 pickle 不过，只有等用户真的上传标书才会暴露。
         # 这里先真跑一遍——自检函数刻意定义在本模块（__main__），因为「把
@@ -9579,6 +10131,10 @@ if __name__ == '__main__':
     print('=' * 60)
     print('  星易查 - 围串标风险识别分析系统')
     print(f'  访问地址: {url}')
+    # Printed here, not only at --check: the console window is the one place a
+    # desktop user can see whether .doc support is really available. A missing
+    # converter is otherwise invisible until a .doc silently yields no text.
+    print(f'  .doc 正文: {_DOC_CONVERTER or "未检测到 LibreOffice（.doc 正文将跳过，可设 SOFFICE_PATH）"}')
     print('=' * 60)
 
     # Desktop build: pop the default browser once the server is up. Delayed so
@@ -9590,7 +10146,15 @@ if __name__ == '__main__':
         app.run(debug=debug, host=host, port=port, threaded=True)
     elif IS_FROZEN and sys.platform == 'darwin' and _run_macos_gui(url, host, port):
         pass  # Cocoa event loop owned the main thread; returned on user quit
+    elif IS_FROZEN and sys.platform == 'win32' and _run_windows_gui(url, host, port):
+        pass  # 托盘消息循环占住主线程，直到用户在角标菜单里选"退出"
     else:
+        if IS_FROZEN and sys.platform == 'win32':
+            # 托盘不可用（pystray/Pillow 缺失或初始化失败）：新建控制台窗口，
+            # 退回"关窗即停"的可见模式——总好过一个看不见也停不掉的进程。
+            if _alloc_console():
+                print('  ⚠ 托盘不可用，已回退控制台窗口模式（关闭本窗口即停止服务）')
+                print(f'  访问地址: {url}')
         try:
             # waitress: production-grade pure-Python WSGI server, the only
             # option on Windows (gunicorn is Unix-only). Long analyses rely on

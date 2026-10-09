@@ -41,6 +41,12 @@ tar xzf XingYiCha-linux-x86_64.tar.gz
 | .doc 元数据比对 | ✅ 完整支持 |
 | .doc 正文 | ⚠️ 需系统安装 LibreOffice（`apt install libreoffice` 等），未装时自动跳过，其余不受影响 |
 
+> LibreOffice 装在 `PATH` 之外的自定义位置（如上游 tar.gz 解包的
+> `/opt/libreoffice25.2`、snap、`/usr/local`）同样会被自动探测；仍识别不到
+> 时设 `SOFFICE_PATH=/opt/libreoffice25.2/program/soffice` 后重启（也可以
+> 指向一个包装脚本，flatpak 等场景适用）。启动日志会打印实际识别到的
+> `.doc 正文` 转换器路径。
+
 数据目录：`~/.local/share/星易查/`（history 与 uploads）。
 
 ## 四、环境变量（低配调优 / 行为微调）
