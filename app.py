@@ -38,7 +38,7 @@ import threading
 #   - 前端 footer 版本标注与静态资源缓存参数（?v=）由模板渲染注入；
 #   - 桌面版 Release 产物文件名后缀、Inno Setup 安装器版本由 CI 从此处
 #     读取（desktop-build.yml「Derive version from app.py」）。
-APP_VERSION = '2.4.0'
+APP_VERSION = '2.5.0'
 
 # ── Frozen (PyInstaller) detection ──────────────────────────────
 # When bundled as a desktop exe, templates/static live inside the bundle

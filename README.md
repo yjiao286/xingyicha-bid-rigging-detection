@@ -19,7 +19,7 @@
 | 元数据比对 | 创建者 / 最后保存者 / 编辑程序 / 模板一致，WPS 硬件 ID 与 ICV；多卷标书聚合全部卷的元数据 |
 | 文本相似度 | 15-gram 哈希索引公共段落 + 近似重复段落（捕获轻度编辑），多层模板过滤（参照精确/参照改写识别/标准认证编号/规则库/全局共现）+ 实质性四维评分；每处匹配标注双方**页码**（PDF）/ 相对位置（Word） |
 | 人员比对 | 中文/英文姓名、手机/座机/身份证/邮箱/银行账号多值联系池，6 层交叉匹配 + 跨文档混装检测 |
-| 报价分析 | 总价/分项/成本明细，中文大写金额解析与大小写互验，费率（bidRate）与服务单价（元/人/天 等按人头计价标书），等差数列与规律性差异检测 |
+| 报价分析 | 总价/分项/成本明细，中文大写金额解析与大小写互验，费率（bidRate）与服务单价（元/人/天 等按人头计价标书），分项序号完整性与跨文件同构自检，等差数列与规律性差异检测 |
 | 文档结构 | 章节标题规律比对（辅助维度） |
 
 ### 判定与评分
@@ -57,7 +57,7 @@
 
 桌面版免 Python、免命令行。到
 [Releases 页面](https://github.com/yjiao286/xingyicha-bid-rigging-detection/releases)
-（当前最新 [v2.4.0](https://github.com/yjiao286/xingyicha-bid-rigging-detection/releases/tag/v2.4.0)）
+（当前最新 [v2.5.0](https://github.com/yjiao286/xingyicha-bid-rigging-detection/releases/tag/v2.5.0)）
 按操作系统下载对应附件：
 
 | 操作系统 / 环境 | 下载文件 | 安装方式 | 详细指南 |
@@ -97,6 +97,9 @@ python3 app.py 5001             # 端口可省略，默认 5001；HOST=0.0.0.0 �
 ```
 
 macOS / Linux 开发机也可直接 `./launch.sh`（自动检查占用、启动并打开浏览器）。
+Windows 开发机双击仓库根目录 `启动测试版.bat`（`py -3.12 tools/make_test_shortcut.py`
+可在桌面建/刷新「星易查 测试版」图标）——自动校验依赖、挑空闲端口、就绪后才开
+浏览器，与已安装的桌面版并存（历史记录与提取缓存共用）。
 
 依赖自检（含并行提取进程池自检，覆盖桌面版冻结路径；不过只告警降级、不阻断）：
 
@@ -127,14 +130,15 @@ python3 app.py --check
 
 ```bash
 ./venv/bin/python3 -c "import py_compile; py_compile.compile('app.py', doraise=True)"  # 语法检查
-./venv/bin/python3 tests/test_extraction.py      # 提取回归（172 例，无 pytest 依赖）
+./venv/bin/python3 tests/test_extraction.py      # 提取回归（250 例，无 pytest 依赖）
 ./venv/bin/python3 tools/replay_extraction.py <语料目录>   # 批量回放文本/人员/报价提取
 ```
 
-- **敏感信息守卫**：每次新克隆先执行 `sh tools/install-hooks.sh` 安装
-  pre-commit / commit-msg / pre-push 三道钩子，防止真实人名、公司名、手机号、
-  统一社会信用代码等泄漏进版本库（详见 [AGENTS.md](AGENTS.md) 与
-  `tools/sensitive-terms.example.txt`）。
+- **敏感信息守卫**：`tools/check_sensitive.py`、`tools/install-hooks.sh` 与词表
+  示例为**本机资产、不入库**（脚本内含拦截词表，入库存放等于自曝）；新机器先从
+  已有机器复制这三份文件，再执行 `sh tools/install-hooks.sh` 安装 pre-commit /
+  commit-msg / pre-push 三道钩子，防止真实人名、公司名、手机号、统一社会信用
+  代码等泄漏进版本库（详见 [AGENTS.md](AGENTS.md)）。
 - **AI 协作规范**：架构细节、性能设计、已知坑与回归约束集中在
   [AGENTS.md](AGENTS.md)，改代码前必读。
 - **发版流程**：改 `app.py` 顶部 `APP_VERSION` → 手动同步 `packaging/星易查.iss`
@@ -154,7 +158,7 @@ packaging/                # 桌面版构建资产（PyInstaller spec / Inno Setu
 build/                    # 便携 Linux 包构建（可重定位 CPython + wheelhouse）
 .github/workflows/        # CI：四平台矩阵构建，push v* tag 自动发 Release
 docs/                     # 部署与运维文档（见下）
-tools/                    # 敏感信息守卫钩子、提取回放工具
+tools/                    # 提取回放/核对工具、测试启动器（敏感守卫为本机资产，不入库）
 tests/                    # 提取回归测试
 output/整体流程图mermaid.md  # 流程图源文件（整体流程图.png 为其渲染产物）
 ```
