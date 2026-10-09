@@ -2176,6 +2176,77 @@ def t_stream_heartbeat_during_silence():
     assert out == [], out
 
 
+def t_std_listing_detector():
+    # 用户报告的误报：国标/体系认证编号段（GB 5749、GB/T19001-2016、
+    # ISO22000:2018、CNCA-R-2002-006、《…标准》名称、认证依据/认证覆盖
+    # 的业务范围等登记词汇）被记成"可能高风险异常段落"。检测器按登记
+    # token 占比判定（阈值 0.7），正样本全部命中、同领域自编叙述全部保留。
+    positives = [
+        'b5749《生活饮用水卫生标准》，GB/T19001-2016/，GB/T45001-2020/IS045001:2018，■机构批准号CNCA-R-2002-006',
+        '通过GB/T19001-2016质量管理体系认证、GB/T45001-2020职业健康安全管理体系认证、ISO22000食品安全管理体系认证。',
+        '具备GB 5749《生活饮用水卫生标准》、GB 31654《食品安全国家标准 餐饮服务通用卫生规范》检测能力，机构批准号CNCA-R-2002-006。',
+        'GB/T19001质量管理体系认证证书、ISO22000食品安全管理体系认证证书、HACCP认证证书、CNAS实验室认可证书。',
+        '管理体系符合ISO22000:2018，认证项目质量管理体系认证(ISO9001)',
+        '认证依据GB/T 19001-2016/SO 9001:2015',
+        '认证覆盖的业务范围',
+        '质量管理体系认证证书 编号：00121Q30215R2M GB/T19001-2016',
+    ]
+    for s in positives:
+        assert m._is_standard_listing(s), s[:40]
+    negatives = [
+        '我方项目经理王强持有GB/T19001内审员证书，负责现场质量管控工作，并承诺全过程驻场服务直至项目结束。',
+        '本项目采用GB/T19001质量管理体系，配备专职食品安全员6名，实行日检周报制度，每月向采购人提交自查报告与整改台账。',
+        '我司已通过GB/T19001-2016、GB/T45001-2020、ISO22000三项体系认证，管理体系覆盖本项目全部服务内容，'
+        '项目经理具备十年从业经验，团队配备食品安全员六名，实行三级质量管控。',
+        '每日对中央厨房的温度记录、留样记录与消毒记录进行三方核查，并按月向采购人提交食品安全自查报告与整改闭环台账。',
+        '本项目投标报价为人民币贰佰万元整，服务期限三年，配备项目经理一名、食品安全员六名。',
+        '我方按GB/T19001标准建立质量管理体系，覆盖投标范围内全部服务，实行过程检验与不合格品控制。',
+    ]
+    for s in negatives:
+        assert not m._is_standard_listing(s), s[:40]
+
+
+def t_std_listing_filtered_from_similarity():
+    # 两家标书同列标准/认证编号行 → 模板扣除（专用理由 + 计数），不进异常。
+    # 同时覆盖"精确匹配段尾部与句号粘连"（'。'归一化为'.'后分词必须切开，
+    # 否则尾部片段和登记 token 粘成一体、覆盖率被稀释到阈值以下）。
+    line = ('b5749《生活饮用水卫生标准》，GB/T19001-2016/，'
+            'GB/T45001-2020/IS045001:2018，■机构批准号CNCA-R-2002-006')
+    t1 = '资质证书：' + line + '。另附检测报告若干。'
+    t2 = '资质情况：' + line + '。详见附件。'
+    r = m.text_similarity_analysis({'甲.docx': t1, '乙.docx': t2})
+    pr = r['pair_results'][0]
+    assert pr['abnormal_count'] == 0, pr['matches']
+    assert pr['substantial_count'] == 0 and pr['suspicious_count'] == 0
+    assert r['std_listing_count'] >= 1, r['std_listing_count']
+    tpl = [mt for mt in pr['matches'] if mt['risk_level'] == 'template']
+    assert any('标准/认证编号罗列' in mt['reasons'][0] for mt in tpl), tpl
+    assert any('标准/认证编号罗列' in f for f in r['findings']), r['findings']
+
+    # 近似段落通道（两家各自微调有效期的登记段）同样不得漏出
+    p1 = ('通过GB/T19001-2016质量管理体系认证、GB/T45001-2020职业健康安全管理体系认证、'
+          'ISO22000食品安全管理体系认证。')
+    t3 = '资质证书 ' + p1 + ' 有效期至2027年。'
+    t4 = '资质情况 ' + p1 + ' 有效期至2028年。'
+    r2 = m.text_similarity_analysis({'甲.docx': t3, '乙.docx': t4})
+    pr2 = r2['pair_results'][0]
+    assert pr2['abnormal_count'] == 0, [(mt['risk_level'], mt['text'][:40]) for mt in pr2['matches']]
+    assert not any(mt.get('near_duplicate') for mt in pr2['matches'] if mt['abnormal'])
+
+
+def t_std_listing_keeps_mixed_paragraph_abnormal():
+    # 反例护栏：含个别标准引用、主体是自编项目叙述的雷同段落必须仍判异常，
+    # 抽查阈值（0.7）不得把这类真实证据一起吞掉。
+    mixed = ('我司已通过GB/T19001-2016、GB/T45001-2020、ISO22000三项体系认证，'
+             '管理体系覆盖本项目全部服务内容，项目经理具备十年从业经验，'
+             '团队配备食品安全员六名，实行三级质量管控。')
+    r = m.text_similarity_analysis({'甲.docx': mixed, '乙.docx': mixed})
+    pr = r['pair_results'][0]
+    assert r['std_listing_count'] == 0, r['std_listing_count']
+    assert pr['abnormal_count'] >= 1, pr['matches']
+    assert pr['matches'][0]['risk_level'] != 'template'
+
+
 def t_ref_derived_rewritten_clause_filtered():
     # 用户报告：招标文件合同条款被投标方改写（称谓替换 乙方→投标人、填空
     # 【  】→【5000元/次】、条款号重排）后，精确子串匹配漏检，条款以

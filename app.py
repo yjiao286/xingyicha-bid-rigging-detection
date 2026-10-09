@@ -5321,6 +5321,87 @@ def find_common_segments(text1, text2, min_len=15):
     return results
 
 
+# ── 标准 / 认证登记文本识别 ────────────────────────────────────
+# 国标号（GB/T19001-2016）、国际标准（ISO22000:2018）、认证与实验室
+# 资质号（CNCA-R-2002-006）、《…标准/规范》名称及认证登记词汇（认证
+# 依据 / 认证覆盖的业务范围 / 实验室认可证书）构成的段落是投标合规
+# 内容：任何投标人都引用同一批国标，两家标书同时出现不构成共现证据
+# （实测误报：标准编号段被 `_score_substantiality` 的编号加分推成
+# "可能高风险异常段落"，近似段落通道也会以 92% 二次误报）。
+# 判定：登记 token / 全部 token >= 0.7 且登记覆盖 >= 8 字符。登记
+# token = 编号形态 ∪ 《…标准…》 ∪ 登记词汇的覆盖率 >= 0.6 的 token，
+# 或证书登记号形态（数字开头、含字母与 >=3 位数字的编号）。
+# 阈值校准（真实语料）：标准/认证登记段 0.83–1.0，含个别标准引用的
+# 自编叙述 0.0–0.43。注意 _normalize_for_match 会把《》折叠为 <>。
+_STD_DESIG_RE = re.compile(
+    r'(?<![a-z])'
+    r'(?:gbj?|jgj|db|dg|sb|ny|hg|qb|cj|sl|tsg|hj|ws|yy|tb|dl|sy|sh|jc|jt|ga|sn'
+    r'|iso|is0|so|iec|ohsas|din|ansi|astm|jis|ul|bs|en'
+    r'|cnca|cnas|cqc|ccc|iaf)'
+    r'(?:[\s\-–—/]{0,2}[a-z]{1,2})?'
+    r'[\s\-–—/]*'
+    r'\d[a-z0-9\-–—/.:]*'
+)
+_STD_TITLE_RE = re.compile(r'[《<][^》>]{2,30}(?:标准|规范|规程|准则|技术要求)[^》>]{0,16}[》>]')
+_CERT_WORD_RE_LIST = ('认证项目', '认证依据', '认证覆盖', '认证证书', '管理体系', '体系认证',
+                      '实验室认可', '机构批准号', '检测能力', '检测报告', '业务范围',
+                      '认证', '证书', '认可', '资质', '实验室', '编号', '注册号',
+                      'haccp', 'cnas', 'cnca', 'cqc', 'iaf', 'iso')
+_STD_TOKEN_SPLIT = re.compile(
+    r'[，,。；;：:、（）()\[\]【】《》<>“”"\'’‘.!?\s]+')
+_CERT_NUM_RE = re.compile(r'[0-9][0-9a-z\-–—/.]{7,}')
+_STD_LISTING_RATIO = 0.7
+
+
+def _is_standard_listing(text):
+    """True when the segment is dominated by standard / certificate register
+    tokens (see the notes above the patterns). Returns a bool; callers treat
+    True as template content."""
+    if not text:
+        return False
+    t = _normalize_for_match(text)
+    if len(t) < 8:
+        return False
+    covered = bytearray(len(t))
+    for rx in (_STD_DESIG_RE, _STD_TITLE_RE):
+        for mt in rx.finditer(t):
+            for i in range(mt.start(), mt.end()):
+                covered[i] = 1
+    for w in _CERT_WORD_RE_LIST:
+        wn = _normalize_for_match(w)
+        start = 0
+        while True:
+            i = t.find(wn, start)
+            if i < 0:
+                break
+            for k in range(i, i + len(wn)):
+                covered[k] = 1
+            start = i + 1
+    tokens = []
+    pos = 0
+    for tok in _STD_TOKEN_SPLIT.split(t):
+        if not tok:
+            continue
+        i = t.find(tok, pos)
+        if i < 0:
+            continue
+        pos = i + len(tok)
+        if len(tok) >= 2:
+            tokens.append((tok, i, i + len(tok)))
+    if not tokens:
+        return False
+    register = 0
+    for tok, a, b in tokens:
+        cov = sum(covered[a:b])
+        digits = sum(c.isdigit() for c in tok)
+        is_cert_no = (bool(_CERT_NUM_RE.fullmatch(tok))
+                      and any(c.isalpha() for c in tok) and digits >= 3)
+        if is_cert_no or cov / (b - a) >= 0.6:
+            register += 1
+    return (register / len(tokens) >= _STD_LISTING_RATIO
+            and sum(covered) >= 8)
+
+
 def is_template_content(text):
     """Check if text is likely a standard template/bid instruction phrase.
     Expanded to cover all lengths and common bid document boilerplate patterns."""
@@ -5438,6 +5519,11 @@ def is_template_content(text):
         # Very high boilerplate density with no concrete data → template
         if bp_density > 0.06 and not re.search(r'\d{2,}', text_stripped):
             return True
+
+    # ── Category 8: Standard / certificate register listing ──
+    # 国标/认证编号 + 《…标准》名称 + 认证登记词汇主导的段落（详见 _is_standard_listing）。
+    if _is_standard_listing(text_stripped):
+        return True
 
     return False
 
@@ -5783,6 +5869,7 @@ def text_similarity_analysis(texts_dict, ref_texts_list=None, on_progress=None,
         'global_template_count': 0,
         'rule_template_count': 0,
         'ref_derived_count': 0,
+        'std_listing_count': 0,
     }
 
     # Normalise the reference documents once, up front. _is_in_reference runs
@@ -5865,6 +5952,24 @@ def text_similarity_analysis(texts_dict, ref_texts_list=None, on_progress=None,
                         'abnormal': False, 'risk_level': 'template',
                         'reasons': ['招标文件/模板内容 — 非异常一致' if in_ref is True
                                     else '招标文件条款的改写形式（称谓替换/填空填充）— 模板衍生，非异常一致'],
+                        'pos1': pos1, 'pos2': pos2,
+                        'page1': page1, 'pct1': pct1,
+                        'page2': page2, 'pct2': pct2,
+                        'ctx1': sanitize_text(ctx1[:400]),
+                        'ctx2': sanitize_text(ctx2[:400])
+                    })
+                    continue
+
+                # ── Filter 1b: Standard / certificate register listing ──
+                if _is_standard_listing(seg_text):
+                    pair_result['template_count'] += 1
+                    results['template_matches'] += 1
+                    results['std_listing_count'] += 1
+                    pair_result['matches'].append({
+                        'index': idx + 1, 'length': length,
+                        'text': sanitize_text(seg_text[:300]),
+                        'abnormal': False, 'risk_level': 'template',
+                        'reasons': ['标准/认证编号罗列（GB/ISO/认证证书等通用合规内容）— 非异常一致'],
                         'pos1': pos1, 'pos2': pos2,
                         'page1': page1, 'pct1': pct1,
                         'page2': page2, 'pct2': pct2,
@@ -6086,9 +6191,12 @@ def text_similarity_analysis(texts_dict, ref_texts_list=None, on_progress=None,
     total_derived = results['ref_derived_count']
     if total_derived > 0:
         filter_parts.append(f'{total_derived} 处招标文件条款改写（称谓替换/填空填充）')
+    total_std = results['std_listing_count']
+    if total_std > 0:
+        filter_parts.append(f'{total_std} 处标准/认证编号罗列')
     if total_template > 0:
         filter_parts.append(
-            f'{total_template - total_global - total_rule - total_derived} 处其他模板')
+            f'{total_template - total_global - total_rule - total_derived - total_std} 处其他模板')
     if filter_parts:
         results['findings'].append(f'模板过滤: {"、".join(filter_parts)} 已排除')
 
