@@ -1599,17 +1599,18 @@ def t_extract_many_matches_sequential():
                 out = []
                 for p in ps:
                     try:
-                        out.append(m.extract_text_with_tables(p) or '')
+                        text, pages = m.extract_text_with_pages(p)
+                        out.append((text or '', pages or []))
                     except Exception:
-                        out.append('')
+                        out.append(('', []))
                 return out
 
             expected = _sequential_reference(paths)
             got = m._extract_many(paths)
-            assert got == expected, [len(g) for g in got]
+            assert got == expected, [len(g[0]) for g in got]
 
             seen = []
-            m._extract_many(paths, on_file_done=lambda i, t: seen.append(i))
+            m._extract_many(paths, on_file_done=lambda i, t, pg=None: seen.append(i))
             assert sorted(seen) == list(range(len(paths))), seen
     finally:
         m.EXTRACT_CACHE_DIR, m.EXTRACT_CACHE_ENABLED = saved_dir, saved_on
@@ -2173,6 +2174,217 @@ def t_stream_heartbeat_during_silence():
                                      should_stop=lambda: True,
                                      heartbeat_every=60))
     assert out == [], out
+
+
+def t_ref_derived_rewritten_clause_filtered():
+    # 用户报告：招标文件合同条款被投标方改写（称谓替换 乙方→投标人、填空
+    # 【  】→【5000元/次】、条款号重排）后，精确子串匹配漏检，条款以
+    # "高风险异常段落"形态漏进结论。k-gram 包含率（阈值 0.5）应识别为
+    # 模板衍生并扣除。样本取自真实语料。
+    ref = ('第十五条 违约责任\n'
+           '1.服务质量违约。乙方服务未达到本合同约定标准的，甲方有权按照【  】标准计收违约金。'
+           '乙方应在甲方要求期限内完成整改，逾期整改的，每逾期一日，甲方有权按照【  】标准计收违约金。'
+           '服务质量问题情节严重、当月累计发生【  】次及以上或逾期超过【  】日仍未整改、整改不到位的，'
+           '甲方有权选择解除合同或收取违约金继续履行合同；')
+    bid = ('11.1.服务质量违约。投标人服务未达到本合同约定标准的，招标人有权按照【5000元/次】标准计收违约金。'
+           '投标人应在招标人要求期限内完成整改，逾期整改的，每逾期一日，招标人有权按照【1000元/日】标准计收违约金。'
+           '服务质量问题情节严重、当月累计发生【2】次及以上或逾期超过【5】日仍未整改、整改不到位的，'
+           '招标人有权选择解除合同或收取违约金继续履行合同；')
+    r = m.text_similarity_analysis({'甲.docx': bid, '乙.docx': bid}, ref_texts_list=[ref])
+    pr = r['pair_results'][0]
+    assert pr['abnormal_count'] == 0, pr['abnormal_count']
+    assert pr['substantial_count'] == 0, pr['substantial_count']
+    assert r['ref_derived_count'] >= 1, r['ref_derived_count']
+    assert r['template_matches'] >= 1
+    # 扣除理由要写明是改写形式而非普通匹配
+    tpl = [mt for mt in pr['matches'] if mt['risk_level'] == 'template']
+    assert any('改写' in mt['reasons'][0] for mt in tpl), tpl[0]['reasons']
+
+
+def t_ref_derived_no_false_positive_on_selfwritten():
+    # 反向护栏：与招标文件无关的自编段落（投标人之间雷同）必须仍判异常，
+    # 包含率过滤不得误伤真正的高风险证据。
+    ref = '第十五条 违约责任。乙方服务未达到本合同约定标准的，甲方有权按照【  】标准计收违约金。'
+    shared = ('我司将为本项目配备专职项目经理一名，实行食品安全日检周报制度，'
+              '每日对中央厨房的温度记录、留样记录与消毒记录进行三方核查，'
+              '并按月向采购人提交食品安全自查报告与整改闭环台账。')
+    r = m.text_similarity_analysis(
+        {'甲.docx': shared, '乙.docx': shared}, ref_texts_list=[ref])
+    pr = r['pair_results'][0]
+    assert r['ref_derived_count'] == 0, r['ref_derived_count']
+    # 未被误扣：条目保留在异常侧（substantial 或降级后的 suspicious），
+    # 而不是变成模板
+    kept = [mt for mt in pr['matches']
+            if mt['risk_level'] in ('substantial', 'suspicious')]
+    assert kept, pr['matches']
+    assert all(mt['risk_level'] != 'template' for mt in pr['matches']), pr['matches']
+
+
+def t_ref_derived_near_duplicate_filtered():
+    # 轻度改写的条款对（两家各自填充了不同的数值）：近似段落通道同样要
+    # 被参照改写过滤拦住，不能以"高度近似段落"的名义漏出。
+    ref = ('1.服务质量违约。乙方服务未达到本合同约定标准的，甲方有权按照【  】标准计收违约金。'
+           '乙方应在甲方要求期限内完成整改，逾期整改的，每逾期一日，甲方有权按照【  】标准计收违约金。')
+    bid_a = ref.replace('【  】', '【5000元/次】', 1)
+    bid_b = ref.replace('【  】', '【6000元/次】', 1)
+    r = m.text_similarity_analysis({'甲.docx': bid_a, '乙.docx': bid_b}, ref_texts_list=[ref])
+    pr = r['pair_results'][0]
+    assert pr['abnormal_count'] == 0, [(x['risk_level'], x['text'][:40]) for x in pr['matches']]
+    assert r['ref_derived_count'] >= 1
+
+
+def t_ref_derived_ignores_filler_runs():
+    # 填充串（同字符重复）不得凭重复 gram 假性命中参照：'········' 类
+    # 文本在招标文件里也常见（省略号/虚线段），信息量护栏须让它们既不进
+    # 索引、也不计入包含率分母。
+    filler = '·' * 400
+    idx = m._build_ref_ngram_index([m._normalize_for_match(filler)])
+    assert idx == set(), '纯填充参照不应产生任何索引项'
+    # 真实条款的包含率不受护栏影响
+    ref = [m._normalize_for_match(
+        '1.服务质量违约。乙方服务未达到本合同约定标准的，甲方有权按照【  】标准计收违约金。'
+        '乙方应在甲方要求期限内完成整改，逾期整改的，每逾期一日，甲方有权按照【  】标准计收违约金。')]
+    idx2 = m._build_ref_ngram_index(ref)
+    assert idx2, '真实条款须产生索引'
+    rewritten = m._normalize_for_match(
+        '11.1.服务质量违约。投标人服务未达到本合同约定标准的，招标人有权按照【5000元/次】标准计收违约金。'
+        '投标人应在招标人要求期限内完成整改，逾期整改的，每逾期一日，招标人有权按照【1000元/日】标准计收违约金。')
+    assert m._reference_derived_ratio(rewritten, idx2) >= m._REF_DERIVED_RATIO
+    # 填充串自身对参照的包含率判 0（不足信息量 gram）
+    assert m._reference_derived_ratio(m._normalize_for_match(filler), idx2) == 0.0
+
+
+def _make_test_pdf(path, pages):
+    import pymupdf as fitz
+    doc = fitz.open()
+    for txt in pages:
+        page = doc.new_page()
+        page.insert_text((72, 96), txt, fontsize=12)
+    doc.save(path)
+    doc.close()
+
+
+def t_pdf_page_numbers_on_matches():
+    # 页码定位闭环：同一段落在甲文档第 2 页、乙文档第 5 页，双侧页码都要
+    # 对且不因内部交换而颠倒（find_common_segments 在 text1 更长时交换
+    # 两文档做索引，返回时必须换回）。
+    import tempfile
+    common = ('The contractor shall appoint an on-site representative responsible for '
+              'daily coordination and supervision, and submit service quality reports.')
+    with tempfile.TemporaryDirectory() as td:
+        pa = os.path.join(td, 'a.pdf')
+        pb = os.path.join(td, 'b.pdf')
+        _make_test_pdf(pa, ['unique-a', common, 'FILLER-THREE ' * 10,
+                            'FILLER-FOUR ' * 10, 'FILLER-FIVE ' * 10])
+        _make_test_pdf(pb, ['cover-b', 'unique-b', 'BFILL-THREE ' * 10,
+                            'BFILL-FOUR ' * 10, common])
+        saved = m.EXTRACT_CACHE_ENABLED
+        m.EXTRACT_CACHE_ENABLED = False
+        try:
+            ta, ea = m.extract_text_with_pages(pa)
+            tb, eb = m.extract_text_with_pages(pb)
+        finally:
+            m.EXTRACT_CACHE_ENABLED = saved
+    assert len(ea) == 5 and len(eb) == 5, (ea, eb)
+    assert ea == sorted(ea) and eb == sorted(eb)
+    # 双向都验：无论哪份在前，归属都不许错
+    r = m.text_similarity_analysis({'甲.pdf': ta, '乙.pdf': tb},
+                                   page_maps={'甲.pdf': ea, '乙.pdf': eb})
+    mt = next(x for x in r['pair_results'][0]['matches'] if 'contractor' in x['text'])
+    assert (mt['page1'], mt['page2']) == (2, 5), (mt['page1'], mt['page2'])
+    r2 = m.text_similarity_analysis({'乙.pdf': tb, '甲.pdf': ta},
+                                    page_maps={'乙.pdf': eb, '甲.pdf': ea})
+    mt2 = next(x for x in r2['pair_results'][0]['matches'] if 'contractor' in x['text'])
+    assert (mt2['page1'], mt2['page2']) == (5, 2), (mt2['page1'], mt2['page2'])
+    # ctx 侧别同步换回：FILLER-THREE 只在甲文档中，a-first 应出现在 ctx1，
+    # b-first 应出现在 ctx2（交换 bug 的直接回归护栏）
+    assert 'FILLER-THREE' in mt['ctx1'], mt['ctx1'][:80]
+    assert 'FILLER-THREE' not in mt['ctx2'], mt['ctx2'][:80]
+    assert 'FILLER-THREE' not in mt2['ctx1'], mt2['ctx1'][:80]
+    assert 'FILLER-THREE' in mt2['ctx2'], mt2['ctx2'][:80]
+
+
+def t_page_boundary_match_maps_to_following_page():
+    # 边界：恰好从页首开始的匹配要归到该页（而非上一页）。page_ends 记录
+    # 每页最后一个字符的下标，bisect_left 的语义正好如此。
+    boundary = ('Boundary paragraph sitting exactly at the top of page three '
+                'and continuing for a while to be substantive.')
+    ta = 'page-one-intro\n' + boundary + '\n'
+    tb = 'other-doc-preamble\n' + boundary + '\n'
+    ends = [len('page-one-intro'), len(ta) - 1]
+    r = m.text_similarity_analysis(
+        {'甲.pdf': ta, '乙.pdf': tb}, page_maps={'甲.pdf': ends, '乙.pdf': []})
+    mt = next(x for x in r['pair_results'][0]['matches'] if 'Boundary' in x['text'])
+    assert mt['page1'] == 2, mt['page1']
+
+
+def t_pct_fallback_without_page_map():
+    # docx/txt 无分页概念 → 回退相对位置百分比；页码字段为 None。
+    # 共有段放在各自文本中部（前面垫独有内容），百分比才有区分度。
+    shared = ('我司将为本项目配备专职项目经理一名，实行食品安全日检周报制度，'
+              '每日对中央厨房的温度记录、留样记录与消毒记录进行三方核查，'
+              '并按月向采购人提交食品安全自查报告与整改闭环台账。')
+    ta = '甲公司特有前言内容，描述企业规模与服务优势。' * 8 + shared
+    tb = '乙公司特有前言，写法完全不同，篇幅也不同。' * 3 + shared
+    r = m.text_similarity_analysis({'甲.docx': ta, '乙.docx': tb})
+    mt = r['pair_results'][0]['matches'][0]
+    assert mt['page1'] is None and mt['page2'] is None, mt
+    assert 1 <= mt['pct1'] <= 100 and 1 <= mt['pct2'] <= 100, mt
+    # 甲文档共有段更靠后（前置内容更长）→ 百分比应更大
+    assert mt['pct1'] > mt['pct2'], (mt['pct1'], mt['pct2'])
+
+
+def t_extract_cache_roundtrips_page_ends():
+    # 缓存升级为 JSON {'t','p'}：读写往返保留页码；旧纯文本条目按无页码
+    # 容忍（解析失败 → 文本照用），保证升级不破旧缓存。
+    import tempfile
+    saved_dir, saved_en = m.EXTRACT_CACHE_DIR, m.EXTRACT_CACHE_ENABLED
+    with tempfile.TemporaryDirectory() as td:
+        m.EXTRACT_CACHE_DIR = td
+        m.EXTRACT_CACHE_ENABLED = True
+        try:
+            m._extract_cache_write('k1', 'TEXT-A', [10, 25])
+            got = m._extract_cache_read('k1')
+            assert got == ('TEXT-A', [10, 25]), got
+            # 旧格式（纯文本）条目：容忍读取、页码为空
+            with open(os.path.join(td, 'k2.txt'), 'w', encoding='utf-8') as f:
+                f.write('LEGACY-PLAIN-TEXT')
+            got2 = m._extract_cache_read('k2')
+            assert got2 == ('LEGACY-PLAIN-TEXT', []), got2
+            # 空文本不入缓存
+            m._extract_cache_write('k3', '', [1])
+            assert m._extract_cache_read('k3') is None
+        finally:
+            m.EXTRACT_CACHE_DIR, m.EXTRACT_CACHE_ENABLED = saved_dir, saved_en
+
+
+def t_history_keeps_match_page_fields():
+    # 页码字段必须进历史精简白名单，否则历史记录页与"历史→下载报告"
+    # 场景丢失定位信息（与 _HISTORY_KEEP 同类的回归形态）。
+    results = {
+        'text_similarity': {'pair_results': [{'matches': [{
+            'index': 1, 'length': 100, 'text': 'x' * 300,
+            'abnormal': True, 'risk_level': 'substantial', 'score': 0.7,
+            'reasons': ['r'], 'near_duplicate': False,
+            'ctx1': 'c1', 'ctx2': 'c2',
+            'page1': 3, 'pct1': None, 'page2': 7, 'pct2': None,
+        }]}]},
+    }
+    light = m._prepare_history_data(results)
+    lm = light['text_similarity']['pair_results'][0]['matches'][0]
+    assert lm['page1'] == 3 and lm['page2'] == 7, lm
+    assert lm['pct1'] is None and lm['pct2'] is None
+
+
+def t_report_table_has_page_columns():
+    # 报告相似度详情表格化：表头须含页码列与双方文件列；页码标签按
+    # PDF 页码 / 百分比回退两种形态渲染。
+    assert m._match_page_label({'page1': 5}, 1) == '第5页'
+    assert m._match_page_label({'pct1': 42}, 1) == '≈42%处'
+    assert m._match_page_label({}, 1) == '—'
+    doc = m.Document()
+    m._report_table(doc, ['a', 'b'], [[1, 2]])
+    assert len(doc.tables) == 1
 
 
 def main():

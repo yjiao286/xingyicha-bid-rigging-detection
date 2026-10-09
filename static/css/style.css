@@ -2008,3 +2008,15 @@ body::after {
 }
 .info-note b { color: var(--text); font-weight: 700; }
 .info-note-icon { flex: none; line-height: 1.5; }
+
+/* 相似段落定位徽标（页码/相对位置） */
+.text-match-loc {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 10px;
+  font-size: 11px;
+  color: #1d4ed8;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  white-space: nowrap;
+}

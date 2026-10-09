@@ -1391,6 +1391,17 @@ function renderSimilarity() {
 
   // ── Per-pair detail sections ──
   let dhtml = '';
+  // 相似段落定位徽标：PDF 带精确页码；docx/txt 等无分页概念给相对位置
+  function _matchLocBadges(m, f1, f2) {
+    const one = (side, fname) => {
+      const page = m['page' + side], pct = m['pct' + side];
+      if (page) return `<span class="text-match-loc" title="${escapeHtml(fname)}">${escapeHtml(shortenName(fname, 8))} 第${page}页</span>`;
+      if (pct) return `<span class="text-match-loc" title="${escapeHtml(fname)}">${escapeHtml(shortenName(fname, 8))} ≈${pct}%处</span>`;
+      return '';
+    };
+    return one('1', f1) + one('2', f2);
+  }
+
   s.pair_results.forEach((pr, pairIdx) => {
     const pairId = `pair-${pairIdx}`;
 
@@ -1456,6 +1467,7 @@ function renderSimilarity() {
             <div class="text-match-header">
               <span class="text-match-num" style="${bgStyle}">#${m.index}</span>
               <span class="text-match-length">${m.length}字</span>
+              ${_matchLocBadges(m, pr.file1, pr.file2)}
               ${(m.reasons||[]).map(r => `<span class="text-match-reason">${escapeHtml(r)}</span>`).join('')}
               ${m.score !== undefined ? `<span class="text-match-score" style="font-size:11px;color:#888;">[评分:${m.score}]</span>` : ''}
               <button class="match-locate-btn" onclick="openMatchModal(${refIdx})">📍 定位</button>
@@ -1474,6 +1486,7 @@ function renderSimilarity() {
               <div class="text-match-header">
                 <span class="text-match-num" style="${bgStyle}">#${m.index}</span>
                 <span class="text-match-length">${m.length}字</span>
+                ${_matchLocBadges(m, pr.file1, pr.file2)}
                 ${m.score !== undefined ? `<span class="text-match-score" style="font-size:11px;color:#888;">[评分:${m.score}]</span>` : ''}
                 <button class="match-locate-btn" onclick="openMatchModal(${refIdx})">📍 定位</button>
               </div>
@@ -1929,8 +1942,14 @@ function renderModalMatch() {
     `第${m.index || '?'}项匹配 (${m.length || 0}字) — ${ref.type === 'abnormal' ? '⚠ 异常一致' : '✅ 模板匹配'}`;
   document.getElementById('matchCounter').textContent =
     `${_currentMatchIdx + 1} / ${_allMatchRefs.length}`;
-  document.getElementById('diffLabel1').textContent = ref.file1 || '';
-  document.getElementById('diffLabel2').textContent = ref.file2 || '';
+  const locSuffix = (side) => {
+    const page = m['page' + side], pct = m['pct' + side];
+    if (page) return `（第${page}页）`;
+    if (pct) return `（≈${pct}%处）`;
+    return '';
+  };
+  document.getElementById('diffLabel1').textContent = (ref.file1 || '') + locSuffix('1');
+  document.getElementById('diffLabel2').textContent = (ref.file2 || '') + locSuffix('2');
   document.getElementById('matchReason').innerHTML = (m.reasons || []).map(r => `<span class="text-match-reason">${escapeHtml(r)}</span>`).join(' ');
   document.getElementById('diffContent1').innerHTML = renderContextWithHighlight(m.ctx1 || matchText, matchText, m.length);
   document.getElementById('diffContent2').innerHTML = renderContextWithHighlight(m.ctx2 || matchText, matchText, m.length);

@@ -1183,7 +1183,7 @@ EXTRACT_CACHE_MAX_FILES = int(os.environ.get('EXTRACT_CACHE_MAX_FILES', 200))
 # Bump when extraction output would change for identical bytes and settings
 # (parser change, new channel, different pipe convention) — otherwise a stale
 # entry survives the upgrade and silently serves the old text.
-_EXTRACT_CACHE_VERSION = '3'   # '2': docx 文档序交错+文本框/页眉；'3': 内嵌图片选择性 OCR
+_EXTRACT_CACHE_VERSION = '4'   # '2': docx 文档序交错+文本框/页眉；'3': 内嵌图片选择性 OCR；'4': 值改 JSON 并带 PDF 页界
 
 
 def _extract_cache_key(filepath, max_pages):
@@ -1205,29 +1205,41 @@ def _extract_cache_key(filepath, max_pages):
 
 
 def _extract_cache_read(key):
-    """Cached extraction text for this key, or None. Never raises."""
+    """Cached (text, page_ends) for this key, or None. Never raises.
+
+    Values are JSON {'t': text, 'p': [page end offsets]}. A file that fails
+    to parse as JSON is a pre-page-map entry — tolerated as plain text with
+    no pages rather than a miss, so the version bump stays advisory."""
     try:
         path = os.path.join(EXTRACT_CACHE_DIR, key + '.txt')
         with open(path, 'r', encoding='utf-8') as f:
-            text = f.read()
+            raw = f.read()
+        try:
+            obj = json.loads(raw)
+            text, pages = obj['t'], obj.get('p') or []
+        except (ValueError, KeyError, TypeError):
+            text, pages = raw, []
         os.utime(path, None)          # LRU touch
-        return text
+        return text, pages
     except Exception:
         return None
 
 
-def _extract_cache_write(key, text):
+def _extract_cache_write(key, text, page_ends=None):
     """Store extraction output (never raises — a failed write is not an error).
 
     Empty results are deliberately not cached: they are what a transient
     failure looks like too, and re-extracting a document that yielded nothing
     is cheap (it found nothing to begin with)."""
+    if not text:
+        return
     try:
         os.makedirs(EXTRACT_CACHE_DIR, exist_ok=True)
         path = os.path.join(EXTRACT_CACHE_DIR, key + '.txt')
         tmp = path + f'.{os.getpid()}.tmp'
         with open(tmp, 'w', encoding='utf-8') as f:
-            f.write(text)
+            f.write(json.dumps({'t': text, 'p': page_ends or []},
+                               ensure_ascii=False))
         os.replace(tmp, path)         # atomic: readers never see a partial file
         _extract_cache_prune()
     except Exception as e:
@@ -1399,33 +1411,34 @@ def _extract_worker(args):
     idx, path, max_pages = args
     _WORKER_CURRENT_FILE = _display_name(path)
     try:
-        return idx, extract_text_with_tables(path, max_pages=max_pages,
-                                             on_progress=_worker_progress,
-                                             cancel_event=_WORKER_CANCEL_EV)
+        return idx, extract_text_with_pages(path, max_pages=max_pages,
+                                            on_progress=_worker_progress,
+                                            cancel_event=_WORKER_CANCEL_EV)
     except Exception:
-        return idx, ''
+        return idx, ('', [])
 
 
 def _extract_many(paths, max_pages=MAX_PDF_PAGES, cancel_event=None,
                   on_file_done=None, on_progress=None):
     """Extract several files, in parallel when that is safe and worthwhile.
 
-    Returns texts aligned with `paths`; a file that fails yields '' (same as
-    the per-file try/except this replaced).
-    on_file_done: callback(index, text) as each file finishes — the parallel
-                  run completes out of order, so this is how a caller streams
-                  progress. Called in the sequential fallback too.
+    Returns (text, page_ends) tuples aligned with `paths`; a file that fails
+    yields ('', []) (same as the per-file try/except this replaced).
+    on_file_done: callback(index, text, page_ends) as each file finishes —
+                  the parallel run completes out of order, so this is how a
+                  caller streams progress. Called in the sequential fallback
+                  too.
     on_progress:  progress callback. The sequential path calls it directly;
                   the parallel path ships events over a queue that workers
                   write to (see _worker_progress), so a 6th positional `file`
                   argument carries the originating document's name.
     """
-    out = [''] * len(paths)
+    out = [('', [])] * len(paths)
 
     def _sequential():
         for idx, p in enumerate(paths):
             try:
-                text = extract_text_with_tables(
+                text, pages = extract_text_with_pages(
                     p, max_pages=max_pages, cancel_event=cancel_event,
                     on_progress=(None if on_progress is None else
                                  (lambda ph, cur, tot, ht, det, _b=os.path.basename(p):
@@ -1433,10 +1446,10 @@ def _extract_many(paths, max_pages=MAX_PDF_PAGES, cancel_event=None,
             except AnalysisCancelled:
                 raise
             except Exception:
-                text = ''
-            out[idx] = text or ''
+                text, pages = '', []
+            out[idx] = (text or '', pages or [])
             if on_file_done:
-                on_file_done(idx, out[idx])
+                on_file_done(idx, out[idx][0], out[idx][1])
         return out
 
     workers = EXTRACT_WORKERS or _extract_worker_count(paths)
@@ -1503,13 +1516,15 @@ def _extract_many(paths, max_pages=MAX_PDF_PAGES, cancel_event=None,
 
     logger.info('并行提取 %d 份文档（%d 进程）', len(paths), workers)
     try:
-        for idx, text in pool.imap_unordered(
+        for idx, result in pool.imap_unordered(
                 _extract_worker, [(i, p, max_pages) for i, p in enumerate(paths)]):
             if cancel_event is not None and cancel_event.is_set():
                 raise AnalysisCancelled()
-            out[idx] = text or ''
+            if isinstance(result, str):        # pre-upgrade worker image
+                result = (result, [])
+            out[idx] = result
             if on_file_done:
-                on_file_done(idx, out[idx])
+                on_file_done(idx, result[0], result[1])
         clean_exit = True
         return out
     except AnalysisCancelled:
@@ -1538,9 +1553,13 @@ def _extract_many(paths, max_pages=MAX_PDF_PAGES, cancel_event=None,
             drainer.join(timeout=1.0)
 
 
-def extract_text_with_tables(filepath, max_pages=MAX_PDF_PAGES, on_progress=None,
+def extract_text_with_pages(filepath, max_pages=MAX_PDF_PAGES, on_progress=None,
                              cancel_event=None):
-    """Extract text including tables from .docx, .doc, .pdf, or .txt.
+    """Extract (text, page_ends) from .docx, .doc, .pdf, or .txt.
+
+    page_ends[i] is the char offset in `text` where PDF page i+1 ends ([]
+    for formats without a page concept) — used to label similarity matches
+    with page numbers.
 
     Caching wrapper: a repeated file with unchanged settings returns the
     previous extraction without re-parsing. The key is computed once and
@@ -1554,12 +1573,21 @@ def extract_text_with_tables(filepath, max_pages=MAX_PDF_PAGES, on_progress=None
         if cached is not None:
             logger.debug('提取缓存命中: %s', os.path.basename(filepath))
             return cached
-    text = _extract_text_uncached(filepath, max_pages=max_pages,
-                                  on_progress=on_progress,
-                                  cancel_event=cancel_event)
-    if key is not None and text:
-        _extract_cache_write(key, text)
-    return text
+    result = _extract_text_uncached(filepath, max_pages=max_pages,
+                                    on_progress=on_progress,
+                                    cancel_event=cancel_event)
+    if key is not None and result[0]:
+        _extract_cache_write(key, result[0], result[1])
+    return result
+
+
+def extract_text_with_tables(filepath, max_pages=MAX_PDF_PAGES, on_progress=None,
+                             cancel_event=None):
+    """Plain-text view of extract_text_with_pages — kept for callers that
+    don't care about page numbers."""
+    return extract_text_with_pages(filepath, max_pages=max_pages,
+                                   on_progress=on_progress,
+                                   cancel_event=cancel_event)[0]
 
 
 def _extract_text_uncached(filepath, max_pages=MAX_PDF_PAGES, on_progress=None,
@@ -1574,10 +1602,10 @@ def _extract_text_uncached(filepath, max_pages=MAX_PDF_PAGES, on_progress=None,
     ftype = get_file_type(filepath)
 
     if ftype == 'txt':
-        return _read_text_file(filepath)
+        return _read_text_file(filepath), []
 
     if ftype == 'xlsx':
-        return _read_xlsx_text(filepath, cancel_event=cancel_event)
+        return _read_xlsx_text(filepath, cancel_event=cancel_event), []
 
     if ftype == 'pdf':
         try:
@@ -1636,6 +1664,11 @@ def _extract_text_uncached(filepath, max_pages=MAX_PDF_PAGES, on_progress=None,
         lines = []
         pages_with_text = 0
         empty_streak = 0
+        # Char offset (in the joined text) where each PDF page ends — drives
+        # the page numbers shown on similarity matches. Empty pages still
+        # append (cum unchanged) so page indices stay aligned with the PDF.
+        page_ends = []
+        cum = 0
 
         # OCR state (only initialized on the first page that needs it)
         ocr_fn = None
@@ -1772,11 +1805,18 @@ def _extract_text_uncached(filepath, max_pages=MAX_PDF_PAGES, on_progress=None,
                         table_pages_done += 1
 
             if has_text or tbl_text:
-                lines.append(text + ('\n' + tbl_text if tbl_text else ''))
+                chunk = text + ('\n' + tbl_text if tbl_text else '')
+                lines.append(chunk)
+                cum += len(chunk) + 1
                 pages_with_text += 1
                 empty_streak = 0
             else:
                 empty_streak += 1
+            # End of page i+1 = offset of its last char (join separator '\n'
+            # excluded): a match starting exactly at a page boundary must map
+            # to the FOLLOWING page, and bisect_left on last-char offsets
+            # gives exactly that.
+            page_ends.append(cum - 1 if cum else 0)
 
             # Early termination: after sampling enough pages with zero text
             if i >= 50 and empty_streak >= MAX_EMPTY_PAGE_STREAK:
@@ -1805,17 +1845,18 @@ def _extract_text_uncached(filepath, max_pages=MAX_PDF_PAGES, on_progress=None,
 
         if fitz_doc is not None:
             fitz_doc.close()
-        return '\n'.join(lines)
+        return '\n'.join(lines), page_ends
 
     if ftype == 'doc':
         text = extract_doc_text_raw(filepath)
         if text:
-            return text
+            return text, []
         # Fallback: try LibreOffice conversion
         docx_path = convert_doc_to_docx(filepath)
         if docx_path:
-            return extract_text_with_tables(docx_path)
-        return ''
+            return _extract_text_uncached(docx_path, max_pages=max_pages,
+                                          cancel_event=cancel_event)
+        return '', []
 
     doc = Document(filepath)
     lines = []
@@ -1877,7 +1918,9 @@ def _extract_text_uncached(filepath, max_pages=MAX_PDF_PAGES, on_progress=None,
                 continue
     lines = _ocr_docx_images(lines, images, doc, cancel_event=cancel_event,
                              on_progress=on_progress)
-    return '\n'.join(lines)
+    # docx has no render-time pagination (that is a printer/font decision),
+    # so no page map — matches carry a relative-position percentage instead.
+    return '\n'.join(lines), []
 
 
 # ── Personnel Extraction ────────────────────────────────────────
@@ -5264,7 +5307,14 @@ def find_common_segments(text1, text2, min_len=15):
         ctx_after = 100
         ctx1 = text1[max(0, raw_a - ctx_before):raw_a_end + ctx_after]
         ctx2 = text2[max(0, raw_b - ctx_before):raw_b_end + ctx_after]
-        results.append((raw_a, raw_b, best_len, seg_raw, ctx1, ctx2))
+        # Un-swap: with L1 > L2 the (text1, pos1_map) trio was rotated above,
+        # so raw_a/ctx1 here are in the CALLER's text2 and vice versa. Rotate
+        # back — consumers pair pos1/ctx1 with the caller's first file (page
+        # numbers depend on it).
+        if swapped:
+            results.append((raw_b, raw_a, best_len, seg_raw, ctx2, ctx1))
+        else:
+            results.append((raw_a, raw_b, best_len, seg_raw, ctx1, ctx2))
         # Advance past this match in the scanned text.
         i2 = best_b + best_len
 
@@ -5573,20 +5623,74 @@ def _is_in_reference(segment, ref_texts_norm):
             return True
     return False
 
+
+# Bidders copy contract clauses out of the tender document but systematically
+# rewrite them — party names 乙方/甲方→投标人/招标人, blanks 【  】 filled with
+# their own values, clause numbers renumbered. Exact substring matching (above)
+# then fails and the clause leaks into abnormal findings as fake evidence.
+# k-gram containment is robust to those local edits. Measured separation on
+# the real 餐饮服务 corpus: rewritten clauses 0.56/0.84 (sub-segments down to
+# ~0.47), self-written domain text (same vocabulary, independently worded)
+# 0.00-0.16 — so 0.4 sits ~2.5x above the false-positive ceiling and below
+# the rewritten floor. hash()-keyed ints keep a ~1M-gram tender document
+# under ~40MB.
+_REF_NGRAM_K = 5
+_REF_DERIVED_RATIO = 0.4
+_REF_DERIVED_MIN_LEN = 40
+# 信息量下限：纯填充串（'········'、'……'、'＿＿＿＿' 这类同字符重复）
+# 的 gram 不参与索引与包含率计算——否则整段填充文本会凭 '·····' 类 gram
+# 假性命中招标文件（真实语料里的省略号/虚线段同样如此）。可由 alnum 判定
+# 覆盖 CJK（Unicode 表意文字 isalnum 为 True）。
+_REF_DERIVED_MIN_GRAMS = 8
+
+
+def _gram_informative(g):
+    return len(set(g)) >= 2 and any(ch.isalnum() for ch in g)
+
+
+def _build_ref_ngram_index(ref_texts_norm):
+    idx = set()
+    for rt in ref_texts_norm:
+        for i in range(len(rt) - _REF_NGRAM_K + 1):
+            g = rt[i:i + _REF_NGRAM_K]
+            if _gram_informative(g):
+                idx.add(hash(g))
+    return idx
+
+
+def _reference_derived_ratio(seg_norm, ref_ngrams):
+    """Fraction of the segment's informative k-grams that appear in the
+    reference index. 0.0 when the segment carries too few informative grams
+    to judge (all-filler runs must never read as reference-derived)."""
+    if not ref_ngrams or len(seg_norm) < _REF_DERIVED_MIN_LEN:
+        return 0.0
+    total = hit = 0
+    for i in range(len(seg_norm) - _REF_NGRAM_K + 1):
+        g = seg_norm[i:i + _REF_NGRAM_K]
+        if not _gram_informative(g):
+            continue
+        total += 1
+        if hash(g) in ref_ngrams:
+            hit += 1
+    if total < _REF_DERIVED_MIN_GRAMS:
+        return 0.0
+    return hit / total
+
 def _split_paragraphs(text):
-    """Split text into (raw, normalized) paragraphs of meaningful size.
-    Splits on newlines; keeps chunks whose normalized length is 40-500 so
-    near-duplicate comparison runs on substantive prose, not table rows."""
+    """Split text into (raw, normalized, start-offset) paragraphs of meaningful
+    size. Splits on newlines; keeps chunks whose normalized length is 40-500 so
+    near-duplicate comparison runs on substantive prose, not table rows. The
+    offset (start of the raw line in `text`) feeds the page locator."""
     if not text:
         return []
     out = []
-    for p in re.split(r'\n+', text):
-        p = p.strip()
+    for m in re.finditer(r'[^\n]+', text):
+        p = m.group(0).strip()
         if not p:
             continue
         n = _normalize_for_match(p)
         if 40 <= len(n) <= 500 and not is_template_content(p):
-            out.append((p, n))
+            out.append((p, n, m.start()))
     return out
 
 
@@ -5614,18 +5718,18 @@ def _find_near_duplicate_paragraphs(text1, text2, min_ratio=0.80, max_ratio=0.98
 
     # Bucket file2 paragraphs by length//25 for length blocking.
     buckets = {}
-    for idx, (raw, norm) in enumerate(paras2):
-        buckets.setdefault(len(norm) // 25, []).append((idx, raw, norm))
+    for idx, (raw, norm, pos) in enumerate(paras2):
+        buckets.setdefault(len(norm) // 25, []).append((idx, raw, norm, pos))
 
     results = []
-    for raw1, norm1 in paras1:
+    for raw1, norm1, pos1 in paras1:
         b = len(norm1) // 25
         candidates = []
         for db in (b - 1, b, b + 1):
             candidates.extend(buckets.get(db, []))
         best = None
         checked = 0
-        for _idx, raw2, norm2 in candidates:
+        for _idx, raw2, norm2, pos2 in candidates:
             if checked >= 40:
                 break
             ln1, ln2 = len(norm1), len(norm2)
@@ -5638,16 +5742,18 @@ def _find_near_duplicate_paragraphs(text1, text2, min_ratio=0.80, max_ratio=0.98
             ratio = sm.ratio()
             if min_ratio <= ratio < max_ratio:
                 if best is None or ratio > best[0]:
-                    best = (ratio, raw2)
+                    best = (ratio, raw2, pos2)
         if best is not None:
-            results.append({'seg1': raw1, 'seg2': best[1], 'ratio': round(best[0], 3)})
+            results.append({'seg1': raw1, 'seg2': best[1],
+                            'ratio': round(best[0], 3),
+                            'pos1': pos1, 'pos2': best[2]})
         if len(results) >= 30:
             break
     return results
 
 
 def text_similarity_analysis(texts_dict, ref_texts_list=None, on_progress=None,
-                             cancel_event=None):
+                             cancel_event=None, page_maps=None):
     """Full text similarity analysis across all uploaded files.
     ref_texts_list: list of text strings from reference/template documents to exclude.
     on_progress: optional callback(percent, detail) fired before each document
@@ -5676,6 +5782,7 @@ def text_similarity_analysis(texts_dict, ref_texts_list=None, on_progress=None,
         'template_matches': 0,
         'global_template_count': 0,
         'rule_template_count': 0,
+        'ref_derived_count': 0,
     }
 
     # Normalise the reference documents once, up front. _is_in_reference runs
@@ -5686,6 +5793,33 @@ def text_similarity_analysis(texts_dict, ref_texts_list=None, on_progress=None,
     # computed here and reused; results are identical, it is just no longer
     # recomputed 3.8k times.
     ref_texts_norm = [_normalize_for_match(rt) for rt in (ref_texts_list or [])]
+    # Lazy: only built when some segment misses the exact reference filter —
+    # sets without references never pay for the index.
+    ref_ngrams = None
+
+    import bisect as _bisect
+
+    def _loc(name, pos, total_len):
+        """(page, pct) locating a match offset within `name`'s text.
+
+        PDFs carry exact page boundaries out of extraction (page_maps);
+        formats without a render-time page concept (docx/txt/xlsx) get a
+        relative position percentage — Ctrl+F-able in the original doc."""
+        ends = (page_maps or {}).get(name)
+        if ends:
+            return _bisect.bisect_left(ends, pos) + 1, None
+        if total_len:
+            return None, max(1, min(100, int(pos * 100 / total_len) + 1))
+        return None, None
+
+    def _ref_derived(seg_text):
+        nonlocal ref_ngrams
+        if not ref_texts_norm:
+            return False
+        if ref_ngrams is None:
+            ref_ngrams = _build_ref_ngram_index(ref_texts_norm)
+        return (_reference_derived_ratio(_normalize_for_match(seg_text),
+                                        ref_ngrams) >= _REF_DERIVED_RATIO)
 
     total_pairs = len(filenames) * (len(filenames) - 1) // 2
     pair_idx = 0
@@ -5712,17 +5846,28 @@ def text_similarity_analysis(texts_dict, ref_texts_list=None, on_progress=None,
             }
 
             for idx, (pos1, pos2, length, seg_text, ctx1, ctx2) in enumerate(segments):
+                page1, pct1 = _loc(filenames[i], pos1, len(t1))
+                page2, pct2 = _loc(filenames[j], pos2, len(t2))
                 # ── Filter 1: Reference document match ──
                 in_ref = _is_in_reference(seg_text, ref_texts_norm)
+                if not in_ref and _ref_derived(seg_text):
+                    # Rewritten form of a tender clause (party names swapped,
+                    # blanks filled) — same template, different characters.
+                    in_ref = 'derived'
                 if in_ref:
                     pair_result['template_count'] += 1
                     results['template_matches'] += 1
+                    if in_ref == 'derived':
+                        results['ref_derived_count'] += 1
                     pair_result['matches'].append({
                         'index': idx + 1, 'length': length,
                         'text': sanitize_text(seg_text[:300]),
                         'abnormal': False, 'risk_level': 'template',
-                        'reasons': ['招标文件/模板内容 — 非异常一致'],
+                        'reasons': ['招标文件/模板内容 — 非异常一致' if in_ref is True
+                                    else '招标文件条款的改写形式（称谓替换/填空填充）— 模板衍生，非异常一致'],
                         'pos1': pos1, 'pos2': pos2,
+                        'page1': page1, 'pct1': pct1,
+                        'page2': page2, 'pct2': pct2,
                         'ctx1': sanitize_text(ctx1[:400]),
                         'ctx2': sanitize_text(ctx2[:400])
                     })
@@ -5739,6 +5884,8 @@ def text_similarity_analysis(texts_dict, ref_texts_list=None, on_progress=None,
                         'abnormal': False, 'risk_level': 'template',
                         'reasons': ['格式模板内容'],
                         'pos1': pos1, 'pos2': pos2,
+                        'page1': page1, 'pct1': pct1,
+                        'page2': page2, 'pct2': pct2,
                         'ctx1': sanitize_text(ctx1[:400]),
                         'ctx2': sanitize_text(ctx2[:400])
                     })
@@ -5755,6 +5902,8 @@ def text_similarity_analysis(texts_dict, ref_texts_list=None, on_progress=None,
                         'abnormal': False, 'risk_level': 'template',
                         'reasons': ['全局模板内容 — 多份文件共现'],
                         'pos1': pos1, 'pos2': pos2,
+                        'page1': page1, 'pct1': pct1,
+                        'page2': page2, 'pct2': pct2,
                         'ctx1': sanitize_text(ctx1[:400]),
                         'ctx2': sanitize_text(ctx2[:400])
                     })
@@ -5775,6 +5924,8 @@ def text_similarity_analysis(texts_dict, ref_texts_list=None, on_progress=None,
                         'abnormal': True, 'risk_level': 'substantial',
                         'score': score, 'reasons': reasons,
                         'pos1': pos1, 'pos2': pos2,
+                        'page1': page1, 'pct1': pct1,
+                        'page2': page2, 'pct2': pct2,
                         'ctx1': sanitize_text(ctx1[:400]),
                         'ctx2': sanitize_text(ctx2[:400])
                     }
@@ -5787,6 +5938,8 @@ def text_similarity_analysis(texts_dict, ref_texts_list=None, on_progress=None,
                         'reasons': reasons, 'risk_level': 'substantial',
                         'score': score,
                         'pos1': pos1, 'pos2': pos2,
+                        'page1': page1, 'pct1': pct1,
+                        'page2': page2, 'pct2': pct2,
                         'ctx1': sanitize_text(ctx1[:400]),
                         'ctx2': sanitize_text(ctx2[:400])
                     })
@@ -5796,6 +5949,8 @@ def text_similarity_analysis(texts_dict, ref_texts_list=None, on_progress=None,
                         'text': sanitize_text(seg_text[:300]),
                         'reasons': reasons, 'score': score,
                         'pos1': pos1, 'pos2': pos2,
+                        'page1': page1, 'pct1': pct1,
+                        'page2': page2, 'pct2': pct2,
                         'ctx1': sanitize_text(ctx1[:400]),
                         'ctx2': sanitize_text(ctx2[:400])
                     })
@@ -5810,6 +5965,8 @@ def text_similarity_analysis(texts_dict, ref_texts_list=None, on_progress=None,
                         'abnormal': False, 'risk_level': 'suspicious',
                         'score': score, 'reasons': reasons + ['[已降级] 段落实质性评分偏低，可能为模板套话'],
                         'pos1': pos1, 'pos2': pos2,
+                        'page1': page1, 'pct1': pct1,
+                        'page2': page2, 'pct2': pct2,
                         'ctx1': sanitize_text(ctx1[:400]),
                         'ctx2': sanitize_text(ctx2[:400])
                     }
@@ -5820,6 +5977,8 @@ def text_similarity_analysis(texts_dict, ref_texts_list=None, on_progress=None,
                         'text': sanitize_text(seg_text[:300]),
                         'reasons': reasons, 'score': score,
                         'pos1': pos1, 'pos2': pos2,
+                        'page1': page1, 'pct1': pct1,
+                        'page2': page2, 'pct2': pct2,
                         'ctx1': sanitize_text(ctx1[:400]),
                         'ctx2': sanitize_text(ctx2[:400])
                     })
@@ -5836,6 +5995,8 @@ def text_similarity_analysis(texts_dict, ref_texts_list=None, on_progress=None,
                         'score': score,
                         'reasons': ['[自动过滤] 实质性评分过低，判定为模板内容'],
                         'pos1': pos1, 'pos2': pos2,
+                        'page1': page1, 'pct1': pct1,
+                        'page2': page2, 'pct2': pct2,
                         'ctx1': sanitize_text(ctx1[:400]),
                         'ctx2': sanitize_text(ctx2[:400])
                     }
@@ -5850,6 +6011,28 @@ def text_similarity_analysis(texts_dict, ref_texts_list=None, on_progress=None,
                 nd_idx += 1
                 nd_seg1 = nd['seg1']
                 nd_seg2 = nd['seg2']
+                nd_p1, nd_pc1 = _loc(filenames[i], nd.get('pos1', 0), len(t1))
+                nd_p2, nd_pc2 = _loc(filenames[j], nd.get('pos2', 0), len(t2))
+                # Near-duplicates of a tender clause are still tender-derived:
+                # each bidder copied it from the reference and lightly adapted
+                # it, which is exactly what near-duplicate detection catches.
+                if _ref_derived(nd_seg1) or _ref_derived(nd_seg2):
+                    pair_result['template_count'] += 1
+                    results['template_matches'] += 1
+                    results['ref_derived_count'] += 1
+                    pair_result['matches'].append({
+                        'index': nd_idx, 'length': len(nd_seg1),
+                        'text': sanitize_text(nd_seg1[:300]),
+                        'abnormal': False, 'risk_level': 'template',
+                        'near_duplicate': True,
+                        'reasons': ['招标文件条款的改写形式（称谓替换/填空填充）— 模板衍生，非异常一致'],
+                        'pos1': nd.get('pos1', 0), 'pos2': nd.get('pos2', 0),
+                        'page1': nd_p1, 'pct1': nd_pc1,
+                        'page2': nd_p2, 'pct2': nd_pc2,
+                        'ctx1': sanitize_text(nd_seg1[:400]),
+                        'ctx2': sanitize_text(nd_seg2[:400])
+                    })
+                    continue
                 nd_len = len(_normalize_for_match(nd_seg1))
                 nd_reasons = [f'高度近似段落（相似度{int(nd["ratio"]*100)}%，仅少量字词差异），排除独立编制可能']
                 nd_score = round(max(0.6, nd['ratio']), 3)
@@ -5859,7 +6042,9 @@ def text_similarity_analysis(texts_dict, ref_texts_list=None, on_progress=None,
                     'abnormal': True, 'risk_level': 'substantial',
                     'near_duplicate': True, 'score': nd_score,
                     'reasons': nd_reasons,
-                    'pos1': 0, 'pos2': 0,
+                    'pos1': nd.get('pos1', 0), 'pos2': nd.get('pos2', 0),
+                    'page1': nd_p1, 'pct1': nd_pc1,
+                    'page2': nd_p2, 'pct2': nd_pc2,
                     'ctx1': sanitize_text(nd_seg1[:400]),
                     'ctx2': sanitize_text(nd_seg2[:400])
                 })
@@ -5872,7 +6057,9 @@ def text_similarity_analysis(texts_dict, ref_texts_list=None, on_progress=None,
                     'text': sanitize_text(nd_seg1[:300]),
                     'reasons': nd_reasons, 'risk_level': 'substantial',
                     'near_duplicate': True, 'score': nd_score,
-                    'pos1': 0, 'pos2': 0,
+                    'pos1': nd.get('pos1', 0), 'pos2': nd.get('pos2', 0),
+                    'page1': nd_p1, 'pct1': nd_pc1,
+                    'page2': nd_p2, 'pct2': nd_pc2,
                     'ctx1': sanitize_text(nd_seg1[:400]),
                     'ctx2': sanitize_text(nd_seg2[:400])
                 }
@@ -5896,8 +6083,12 @@ def text_similarity_analysis(texts_dict, ref_texts_list=None, on_progress=None,
         filter_parts.append(f'{total_global} 处全局共现模板')
     if total_rule > 0:
         filter_parts.append(f'{total_rule} 处规则库模板')
+    total_derived = results['ref_derived_count']
+    if total_derived > 0:
+        filter_parts.append(f'{total_derived} 处招标文件条款改写（称谓替换/填空填充）')
     if total_template > 0:
-        filter_parts.append(f'{total_template - total_global - total_rule} 处其他模板')
+        filter_parts.append(
+            f'{total_template - total_global - total_rule - total_derived} 处其他模板')
     if filter_parts:
         results['findings'].append(f'模板过滤: {"、".join(filter_parts)} 已排除')
 
@@ -6205,7 +6396,8 @@ def _extract_project_name(texts_by_file):
     return display[best_key]
 
 
-def run_full_analysis(filepaths, ref_filepaths=None, group_map=None, group_texts=None, on_progress=None,
+def run_full_analysis(filepaths, ref_filepaths=None, group_map=None, group_texts=None,
+                       group_page_maps=None, on_progress=None,
                       cancel_event=None):
     """Run all analysis modules and return structured results.
     ref_filepaths: optional reference/template document paths.
@@ -6265,16 +6457,25 @@ def run_full_analysis(filepaths, ref_filepaths=None, group_map=None, group_texts
     # 100% duplicate extraction; only re-extract what is missing.
     if group_texts is None:
         group_texts = {}
+    if group_page_maps is None:
+        group_page_maps = {}
     pending = [(gn, p) for gn in display_names if gn not in group_texts
                for p in group_map.get(gn, [])]
     if pending:
-        texts = _extract_many([p for _, p in pending], max_pages=MAX_PDF_PAGES,
-                              cancel_event=cancel_event)
-        for (gn, _), text in zip(pending, texts):
+        extracted = _extract_many([p for _, p in pending],
+                                  max_pages=MAX_PDF_PAGES,
+                                  cancel_event=cancel_event)
+        for (gn, _), (text, pages) in zip(pending, extracted):
             # A file that failed contributes nothing, exactly as the
             # per-file try/except this replaced did.
             if text:
+                base = len(group_texts.get(gn, ''))
                 group_texts[gn] = group_texts.get(gn, '') + text + '\n'
+                if pages:
+                    # Multi-volume groups: later volumes' offsets shift past
+                    # the text already joined (plus the '\n' between volumes).
+                    group_page_maps.setdefault(gn, []).extend(
+                        off + base + (1 if base else 0) for off in pages)
             else:
                 group_texts.setdefault(gn, '')
 
@@ -6325,7 +6526,7 @@ def run_full_analysis(filepaths, ref_filepaths=None, group_map=None, group_texts
     similarity = text_similarity_analysis(
         all_text, ref_texts,
         on_progress=lambda pct, d='': _progress('similarity', '文本相似度分析', pct, d),
-        cancel_event=cancel_event)
+        cancel_event=cancel_event, page_maps=group_page_maps)
 
     # 6. Structure
     all_structure = {}
@@ -7296,6 +7497,17 @@ def _severity_runs(p, sev_key):
     body.font.color.rgb = color
 
 
+def _match_page_label(m, side):
+    """位置标签：PDF 精确页码 / 其他格式的相对位置百分比。"""
+    page = m.get('page' + str(side))
+    if page:
+        return f'第{page}页'
+    pct = m.get('pct' + str(side))
+    if pct:
+        return f'≈{pct}%处'
+    return '—'
+
+
 def _report_table(doc, header, rows):
     """Bordered docx table with bold header; plain table if style missing."""
     table = doc.add_table(rows=1, cols=len(header))
@@ -7430,7 +7642,10 @@ def generate_report_docx(analysis):
             pair = f'（{m.get("pair")}）' if m.get('pair') else ''
             key_risks.append(('元数据', f'{m.get("field")}: {m.get("value")}{pair}'))
     for e in (similarity_section.get('substantial_abnormal') or [])[:3]:
-        key_risks.append(('文本', f'{e.get("pair")} 异常一致: {str(e.get("text", ""))[:80]}'))
+        loc1 = _match_page_label(e, 1)
+        loc2 = _match_page_label(e, 2)
+        key_risks.append(('文本', f'{e.get("pair")} 异常一致（文件1 {loc1} / 文件2 {loc2}）: '
+                                  f'{str(e.get("text", ""))[:80]}'))
     for f_text in (pricing_section.get('findings') or []):
         s = str(f_text)
         if any(k in s for k in ('一致', '等差', '高度接近')):
@@ -7537,18 +7752,35 @@ def generate_report_docx(analysis):
 
             abnormal_matches = [m for m in (pr.get('matches') or []) if m.get('abnormal')]
             if abnormal_matches:
-                doc.add_heading('异常一致段落详情:', level=3)
+                doc.add_heading('异常一致段落对比:', level=3)
+                f1n = str(pr.get('file1', '文件1'))
+                f2n = str(pr.get('file2', '文件2'))
+                rows = []
                 for m in abnormal_matches[:30]:  # Limit to top 30
                     m_score = m.get('score')
-                    score_str = f'，实质性评分 {m_score:.0%}' if isinstance(m_score, (int, float)) else ''
-                    nd = '【高度近似】' if m.get('near_duplicate') else ''
+                    score_str = f' {m_score:.0%}' if isinstance(m_score, (int, float)) else ''
+                    kind = ('高度近似' if m.get('near_duplicate') else '高风险') + score_str
+                    t1 = str(m.get('text', '')).replace('\n', ' ')[:150]
+                    t2 = str(m.get('ctx2', '')).replace('\n', ' ')[:150]
+                    if m.get('near_duplicate') and t2:
+                        # 双侧文本不同才值得列出来源差异，逐字相同的只在左侧展示
+                        content = f'【1】{t1}　【2】{t2}'
+                    else:
+                        content = t1
                     reasons = '；'.join(str(r) for r in (m.get('reasons') or []))
-                    reason_str = f'（{reasons}）' if reasons else ''
-                    doc.add_paragraph(
-                        f'{nd}第{m.get("index")}项 ({m.get("length")}字{score_str}): '
-                        f'{str(m.get("text", ""))[:150]}...{reason_str}',
-                        style='List Bullet'
-                    )
+                    rows.append([
+                        f'#{m.get("index")}',
+                        kind,
+                        _match_page_label(m, 1),
+                        _match_page_label(m, 2),
+                        content,
+                        reasons or '-',
+                    ])
+                _report_table(doc, ['#', '评定', f'{f1n[:14]} 位置', f'{f2n[:14]} 位置',
+                                    '相似段落内容（【1】=左侧文件，【2】=右侧文件）',
+                                    '判定依据'], rows)
+                doc.add_paragraph('说明：位置为 PDF 原始页码；Word/txt 等无分页概念的格式显示为'
+                                  '文档内相对位置百分比，可据此快速定位原文。')
     else:
         _conclusion_para(doc, '未进行文本相似度比对（文件数不足或未提取到有效文本）。', color=_GRAY)
 
@@ -7907,6 +8139,9 @@ def _prepare_history_data(results):
                 'near_duplicate': m.get('near_duplicate', False),
                 'ctx1': m.get('ctx1', '')[:400],
                 'ctx2': m.get('ctx2', '')[:400],
+                # 页码/相对位置：相似段落定位（前端徽标 + 报告表格）
+                'page1': m.get('page1'), 'pct1': m.get('pct1'),
+                'page2': m.get('page2'), 'pct2': m.get('pct2'),
             })
         pr['matches'] = light_matches
 
@@ -8122,6 +8357,7 @@ def analyze_stream():
         #    drains to the client in real time, not all at once after
         #    extraction finishes) ──
         group_texts = {}
+        group_page_maps = {}
         extraction_errors = []
         extraction_done = threading.Event()
 
@@ -8132,12 +8368,18 @@ def analyze_stream():
                         for gi, (g, ps) in enumerate(group_map.items())
                         for p in ps]
                 combined = defaultdict(str)
+                combined_pages = defaultdict(list)
                 done = [0]
 
-                def on_file_done(idx, text):
+                def on_file_done(idx, text, pages=None):
                     gi, group, p = jobs[idx]
                     if text:
+                        base = len(combined[group])
                         combined[group] += text + '\n'
+                        if pages:
+                            combined_pages[group].extend(
+                                off + base + (1 if base else 0)
+                                for off in pages)
                     else:
                         msg = f'文件 {os.path.basename(p)} 文字提取失败或为空'
                         extraction_errors.append(msg)
@@ -8193,6 +8435,8 @@ def analyze_stream():
                                            else _parallel_progress))
                 for group in group_map:
                     group_texts.setdefault(group, combined[group])
+                    if combined_pages[group]:
+                        group_page_maps.setdefault(group, combined_pages[group])
                 if len(jobs) > 1:
                     progress_queue.put({
                         'type': 'extract', 'phase': 'pdf_done',
@@ -8255,6 +8499,7 @@ def analyze_stream():
                 results_holder.append(run_full_analysis(
                     saved, saved_refs if saved_refs else None,
                     group_map=group_map, group_texts=group_texts,
+                    group_page_maps=group_page_maps,
                     on_progress=on_progress, cancel_event=cancel_event
                 ))
             except AnalysisCancelled:
@@ -8405,9 +8650,14 @@ def single_upload_and_analyze():
         extraction_warnings = []
         _jobs = [(g, p) for g, ps in group_map.items() for p in ps]
         _texts = _extract_many([p for _, p in _jobs], max_pages=MAX_PDF_PAGES)
-        for (group, _), text in zip(_jobs, _texts):
+        group_pages = {}
+        for (group, _), (text, pages) in zip(_jobs, _texts):
             if text:
+                base = len(group_texts.get(group, ''))
                 group_texts[group] = group_texts.get(group, '') + text + '\n'
+                if pages:
+                    group_pages.setdefault(group, []).extend(
+                        off + base + (1 if base else 0) for off in pages)
             else:
                 group_texts.setdefault(group, '')
         for group in group_map:
@@ -8420,7 +8670,8 @@ def single_upload_and_analyze():
                 )
 
         results = run_full_analysis(saved, saved_refs if saved_refs else None,
-                                    group_map=group_map, group_texts=group_texts)
+                                    group_map=group_map, group_texts=group_texts,
+                                    group_page_maps=group_pages)
         results['_filenames'] = [os.path.basename(s) for s in saved]
         results['_ref_filenames'] = [os.path.basename(s) for s in saved_refs]
         results['_groups'] = {g: [os.path.basename(p) for p in paths] for g, paths in group_map.items()}
