@@ -2357,6 +2357,24 @@ def t_person_role_word_and_crossline_rejected():
     assert m._is_person_name('李旭丽')
 
 
+def t_ref_derived_short_identifier_segment():
+    # '、WFWJ-070020260602108-BG-1（ZC26G23022'（38 字符）曾漏成高风险：
+    # 两家标书的招标编号相同、ZC 尾号各异（分歧点截断公共段），而招标文件
+    # 里是第三个尾号——既非参照子串（精确过滤放行），又恰低于参照改写过滤
+    # 的 40 字符门槛。门槛降到 30 后按包含率归为招标文件改写。
+    ref = ('招标编号：WFWJ-070020260602108-BG-1（ZC26G230221）。'
+           '采购需求：本项目拟采购餐饮服务，覆盖面广，服务标准执行国家相关规定，'
+           '具体内容详见第五章采购需求全部条款与附件说明。')
+    ta = '我公司参加贵司组织的、WFWJ-070020260602108-BG-1（ZC26G230223）招标'
+    tb = '我公司参加贵司组织的、WFWJ-070020260602108-BG-1（ZC26G230225）招标'
+    assert m._REF_DERIVED_MIN_LEN <= 35, '门槛被调回将复现 WFWJ 漏检'
+    r = m.text_similarity_analysis({'甲.docx': ta, '乙.docx': tb}, ref_texts_list=[ref])
+    pr = r['pair_results'][0]
+    seg = max(pr['matches'], key=lambda x: x.get('length', 0))
+    assert seg['risk_level'] == 'template', (seg['risk_level'], seg['text'][:50])
+    assert pr['abnormal_count'] == 0, [(x['risk_level'], x['text'][:40]) for x in pr['matches']]
+
+
 def t_std_listing_number_plus_name_word():
     # 'GB2760-2024食品添加剂使用标准'：编号覆盖 + 标准名词使覆盖率停在
     # 0.59（<0.6 门槛）——整段曾漏进高风险查重结果。编号形态与 标准/规范/
