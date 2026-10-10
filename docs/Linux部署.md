@@ -4,8 +4,8 @@
 
 | 形式 | 文件 | 适用 |
 |------|------|------|
-| AppImage | `XingYiCha-x86_64.AppImage` | 单文件，`chmod +x` 后双击即运行 |
-| 便携版 | `XingYiCha-linux-x86_64.tar.gz` | 解压即用 |
+| AppImage | `XingYiCha-x86_64-<版本号>.AppImage` | 单文件，`chmod +x` 后双击即运行 |
+| 便携版 | `XingYiCha-linux-x86_64-<版本号>.tar.gz` | 解压即用 |
 
 > 信创环境（银河麒麟 V10，含 x86_64 海光/兆芯与 aarch64 飞腾/鲲鹏）请参见
 > [银河麒麟部署.md](银河麒麟部署.md)——注意 glibc 兼容性、KYLSEC 放行与
@@ -14,22 +14,28 @@
 ## 一、获取（云端构建，与 Windows 版同源）
 
 1. 登录 GitHub（私有仓库需有权限的账号）
-2. Actions 页手动 Run workflow，或打 `v*` tag 自动发布
-3. Release 页面下载 `XingYiCha-x86_64.AppImage` 或 tar.gz
+2. Actions 页 → **桌面版三平台构建** → Run workflow：不带参数的手动运行
+   产物在 Artifacts 区（保留 1 天）；参数里填 `release_tag`（如 `v3.0.0`）
+   则直传该 Release。或直接打 `v*` tag 自动构建并发布
+3. Release 页面下载 `XingYiCha-x86_64-<版本号>.AppImage` 或 tar.gz
    （Actions 产物与 Release 附件内容一致）
 
 ## 二、使用
 
 **AppImage**：
 ```bash
-chmod +x XingYiCha-x86_64.AppImage
-./XingYiCha-x86_64.AppImage        # 双击亦可（需桌面环境文件管理器设置"可执行"）
+chmod +x XingYiCha-x86_64-<版本号>.AppImage
+./XingYiCha-x86_64-<版本号>.AppImage   # 双击亦可（需桌面环境文件管理器设置"可执行"）
 ```
 启动后自动打开浏览器访问 `http://127.0.0.1:5001`，终端窗口关闭即停止服务。
 
+> Linux 桌面版没有 Windows 的托盘角标，也没有 macOS 的 Dock 图标与菜单栏
+> 状态项——**终端窗口就是程序本体**（关窗即停服），使用期间保持窗口开着。
+> 数据目录等文件管理器操作直接访问 `~/.local/share/星易查/` 即可。
+
 **便携版**：
 ```bash
-tar xzf XingYiCha-linux-x86_64.tar.gz
+tar xzf XingYiCha-linux-x86_64-<版本号>.tar.gz
 ./XingYiCha/XingYiCha
 ```
 

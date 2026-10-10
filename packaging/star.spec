@@ -99,7 +99,12 @@ if ON_MACOS:
         bootloader_ignore_signals=False,
         strip=False,
         upx=False,
-        console=True,  # macOS Finder 启动无窗口，交互走 Cocoa 图形层（app.py _run_macos_gui）；console 仅影响启动方式，不影响行为
+        # console=True：从终端/CI 跑裸二进制（--check 等）时保留标准输出。
+        # 注意 PyInstaller 会因此往 Info.plist 里注入 LSBackgroundOnly=true
+        # （building/osx.py：console ⇒ 后台应用），下面 info_plist 显式翻回
+        # False——不翻的话 .app 不进 Dock、无法激活，菜单栏"星"也不可靠
+        # （v2.5.0 实测：用户装完"看不到任务栏图标"即此因）。
+        console=True,
         icon=os.path.join(SPECPATH, 'star.icns') if os.path.exists(os.path.join(SPECPATH, 'star.icns')) else None,
     )
     coll = COLLECT(
@@ -118,8 +123,11 @@ if ON_MACOS:
         info_plist={
             'CFBundleDisplayName': '星易查',
             'CFBundleName': NAME,
-            'CFBundleShortVersionString': '2.5.0',
+            'CFBundleShortVersionString': '3.0.0',
             'NSHighResolutionCapable': True,
+            # 见上：抵消 console=True 隐式注入的 LSBackgroundOnly，
+            # .app 必须是常规前台应用（Dock 图标 + Dock 点按 reopen）。
+            'LSBackgroundOnly': False,
             # onnxruntime>=1.19 的 macOS x86_64 wheel 最低要求 10.15，
             # 标低了会在 10.13/10.14 上启动即 import 失败（OCR 降级）。
             'LSMinimumSystemVersion': '10.15',

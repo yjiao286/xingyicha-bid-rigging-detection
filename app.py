@@ -38,7 +38,7 @@ import threading
 #   - 前端 footer 版本标注与静态资源缓存参数（?v=）由模板渲染注入；
 #   - 桌面版 Release 产物文件名后缀、Inno Setup 安装器版本由 CI 从此处
 #     读取（desktop-build.yml「Derive version from app.py」）。
-APP_VERSION = '2.5.0'
+APP_VERSION = '3.0.0'
 
 # ── Frozen (PyInstaller) detection ──────────────────────────────
 # When bundled as a desktop exe, templates/static live inside the bundle
@@ -10979,7 +10979,7 @@ def _run_macos_gui(url, host, port):
     application is not open anymore'. Running NSApplication on the main
     thread gives the process a real event loop:
       - Dock icon click / Finder relaunch -> reopen -> (re)open the page
-      - menu-bar status item: 打开页面 / 退出
+      - menu-bar status item: 打开页面 / 打开数据目录 / 退出（与 Windows 托盘同文案）
     waitress moves to a daemon worker thread (it is a thread pool anyway)
     and dies with the process when the user quits. Returns True once the
     user quit the GUI; False when AppKit is unavailable so the caller can
@@ -10999,11 +10999,15 @@ def _run_macos_gui(url, host, port):
         def openPage_(self, sender):
             _open_page(self.page_url)
 
+        def openDataDir_(self, sender):
+            _open_path_in_file_manager(self.data_dir)
+
         def quit_(self, sender):
             NSApplication.sharedApplication().terminate_(sender)
 
     delegate = _Delegate.alloc().init()
     delegate.page_url = url
+    delegate.data_dir = _DATA_DIR
 
     nsapp = NSApplication.sharedApplication()
     nsapp.setDelegate_(delegate)
@@ -11013,12 +11017,16 @@ def _run_macos_gui(url, host, port):
     status_item.button().setTitle_('星')
     menu = NSMenu.alloc().init()
     item_open = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-        '打开页面', 'openPage:', '')
+        _TRAY_OPEN, 'openPage:', '')
     item_open.setTarget_(delegate)
     menu.addItem_(item_open)
+    item_data = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        _TRAY_DATA, 'openDataDir:', '')
+    item_data.setTarget_(delegate)
+    menu.addItem_(item_data)
     menu.addItem_(NSMenuItem.separatorItem())
     item_quit = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-        '退出星易查', 'quit:', '')
+        _TRAY_QUIT, 'quit:', '')
     item_quit.setTarget_(delegate)
     menu.addItem_(item_quit)
     status_item.setMenu_(menu)

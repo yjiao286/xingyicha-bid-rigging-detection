@@ -12,18 +12,21 @@
 
 ## 一、获取安装包（云端构建，无需 Windows 机器）
 
-1. 打开 GitHub 仓库 → **Actions** 标签页 → 左侧 **Windows 构建打包**
+1. 打开 GitHub 仓库 → **Actions** 标签页 → 左侧 **桌面版三平台构建**
 2. 点右侧 **Run workflow** → 分支选 `main` → 点绿色按钮
-3. 等待约 15-20 分钟构建完成（绿色 ✓）
-4. 点进本次运行，页面底部 **Artifacts** 区域下载 `星易查-Windows` 压缩包，
+3. 等待约 15-25 分钟构建完成（绿色 ✓）
+4. 点进本次运行，页面底部 **Artifacts** 区域下载 `星易查-windows` 压缩包，
    解压得到 `星易查-Setup.exe` 与 `星易查-便携版.zip`
-   （Release 页面则为 ASCII 名 `XingYiCha-*`）
+   （Release 页面则为 ASCII 名 `XingYiCha-*`，文件名带版本号后缀）
 
-> 打 tag（如 `v1.0.0`）再 push，会自动创建 GitHub Release 并把两个文件挂在
-> Release 页面上，方便长期分发。
+> 打 tag（如 `v3.0.0`）再 push，会自动创建 GitHub Release 并把两个文件挂在
+> Release 页面上，方便长期分发；手动 Run workflow 时也可在参数里填
+> `release_tag`（如 `v3.0.0`），产物直传该 Release——比 Artifacts 长效
+> （手动运行的 Artifacts 仅保留 1 天）。
 >
 > 私有仓库使用 GitHub 免费额度（每月 2000 分钟，Windows 按 2 倍计费，
-> 一次构建约消耗 30-40 分钟额度）。
+> 一次构建约消耗 30-40 分钟额度；同一 workflow 的 macOS 作业按 10 倍计费，
+> 打 tag 发版时四平台会一起构建）。
 
 ## 二、安装与使用
 

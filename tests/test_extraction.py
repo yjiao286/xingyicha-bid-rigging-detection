@@ -2119,6 +2119,34 @@ def t_app_version_consistent_across_release_surfaces():
         assert f"'CFBundleShortVersionString': '{ver}'" in f.read(), 'star.spec 版本未同步'
 
 
+def t_macos_bundle_not_background_only():
+    # PyInstaller 的 BUNDLE 在 EXE console=True 时会向 Info.plist 注入
+    # LSBackgroundOnly=true（PyInstaller/building/osx.py：console ⇒ 后台应用），
+    # spec 的 info_plist 合并发生在注入之后，可覆盖。后台应用的形态正是
+    # v2.5.0 的线上 bug：.app 不进 Dock、无法激活，菜单栏"星"状态项也不可靠，
+    # 用户表现为"装完没有任务栏图标"。删掉这行覆盖不会有任何构建期报错，
+    # 只能靠本测试静态拦截（CI 的 smoke test 只跑 --check，覆盖不到 GUI）。
+    root = os.path.dirname(os.path.abspath(m.__file__))
+    with open(os.path.join(root, 'packaging', 'star.spec'), encoding='utf-8') as f:
+        spec_src = f.read()
+    assert "'LSBackgroundOnly': False" in spec_src, (
+        'star.spec 须显式 LSBackgroundOnly=False：console=True 会让 PyInstaller '
+        '注入 True，.app 将以后台应用运行（不进 Dock、无菜单栏图标）')
+    # macOS 菜单栏菜单与 Windows 托盘同构：打开页面/打开数据目录/退出。
+    # 数据目录入口（~/Library/Application Support/星易查）是用户取
+    # 历史记录/日志/上传文件的唯一 Finder 入口。
+    with open(os.path.join(root, 'app.py'), encoding='utf-8') as f:
+        app_src = f.read()
+    gui_src = app_src[app_src.index('def _run_macos_gui'):app_src.index('if __name__')]
+    assert "'openDataDir:'" in gui_src and '_TRAY_DATA' in gui_src, (
+        'macOS 菜单栏菜单须含"打开数据目录"（对齐 Windows 托盘）')
+    # 顺序断言从菜单构建处起算、对常量标识符断言（菜单代码用的是
+    # _TRAY_* 常量而非字面量；docstring 里也出现中文文案，不能作依据）
+    menu_src = gui_src[gui_src.index('NSMenu.alloc'):]
+    assert menu_src.index('_TRAY_OPEN') < menu_src.index('_TRAY_DATA') \
+        < menu_src.index('_TRAY_QUIT'), 'macOS 菜单顺序须为 打开页面/打开数据目录/退出'
+
+
 def t_waitress_body_cap_matches_upload_policy():
     # 桌面版 waitress 原生 max_request_body_size 默认仅 1GB，且在服务器层
     # 拦截、到不了 Flask：>1GB 的批次（多份扫描件标书很常见）要么收到
