@@ -123,7 +123,7 @@ if ON_MACOS:
         info_plist={
             'CFBundleDisplayName': '星易查',
             'CFBundleName': NAME,
-            'CFBundleShortVersionString': '3.0.0',
+            'CFBundleShortVersionString': '3.0.1',
             'NSHighResolutionCapable': True,
             # 见上：抵消 console=True 隐式注入的 LSBackgroundOnly，
             # .app 必须是常规前台应用（Dock 图标 + Dock 点按 reopen）。

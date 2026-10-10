@@ -1568,9 +1568,15 @@ function renderPricing() {
         '</div><div class="stat-label">' + label + '</div></div>';
     };
     var kpi = '<div class="summary-stat" style="margin:0;">';
-    kpi += pchip(pricedFiles.length + '/' + files.length,
-      pricedFiles.length === 0 && rateFiles.length > 0 ? 'warn' : '',
-      pricedFiles.length ? '报价文件数' : (rateFiles.length ? '报价文件数（费率报价）' : '报价文件数'));
+    // Rate-only corpora (service bids priced e.g. 元/人/天 have no 总价): count
+    // rate files so the chip reads 11/12, not a misleading 0/12. Orange only
+    // when coverage is incomplete or nothing at all was extracted.
+    var rateOnly = pricedFiles.length === 0 && rateFiles.length > 0;
+    var kpiCount = rateOnly ? rateFiles.length : pricedFiles.length;
+    var kpiCls = ((rateOnly && rateFiles.length < files.length) ||
+      (!rateOnly && pricedFiles.length === 0)) ? 'warn' : '';
+    kpi += pchip(kpiCount + '/' + files.length, kpiCls,
+      rateOnly ? '费率报价文件数' : '报价文件数');
     if (keyVals.length > 0) {
       var maxV = Math.max.apply(null, keyVals.map(function(f) { return f[priceKey]; }));
       var minV = Math.min.apply(null, keyVals.map(function(f) { return f[priceKey]; }));

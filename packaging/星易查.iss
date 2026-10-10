@@ -8,7 +8,7 @@
 
 #define MyAppName "星易查"
 #define MyAppFullName "星易查 - 围串标风险识别分析系统"
-#define MyAppVersion "3.0.0"
+#define MyAppVersion "3.0.1"
 #define MyAppExeName "星易查.exe"
 
 [Setup]

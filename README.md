@@ -76,7 +76,7 @@
 
 桌面版免 Python、免命令行。到
 [Releases 页面](https://github.com/yjiao286/xingyicha-bid-rigging-detection/releases)
-（当前最新 [v3.0.0](https://github.com/yjiao286/xingyicha-bid-rigging-detection/releases/tag/v3.0.0)）
+（当前最新 [v3.0.1](https://github.com/yjiao286/xingyicha-bid-rigging-detection/releases/tag/v3.0.1)）
 按操作系统下载对应附件：
 
 | 操作系统 / 环境 | 下载文件 | 安装方式 | 详细指南 |
