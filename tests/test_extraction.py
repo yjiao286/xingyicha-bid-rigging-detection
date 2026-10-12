@@ -2156,7 +2156,10 @@ def t_waitress_body_cap_matches_upload_policy():
     # 超限请求穿到 Flask、由 _too_large 返回带具体限额的 JSON。
     import importlib.util
 
-    from waitress.adjustments import Adjustments
+    try:
+        from waitress.adjustments import Adjustments
+    except ImportError:
+        return  # waitress absent: desktop-only dep (server deploys use gunicorn)
 
     assert 'MAX_CONTENT_LENGTH_MB' not in os.environ, '测试环境须不设该变量'
     assert m._waitress_max_body_bytes == 32 * 1024 * 1024 * 1024
@@ -2192,7 +2195,10 @@ def t_waitress_channel_timeout_covers_analysis_budget():
     # waitress 默认 channel_timeout=120s 会收割"不活跃"连接；分析期间的
     # 长静默段（并行提取纯 docx/文字PDF 批次无 OCR 事件）必须被覆盖，
     # 否则流在分析中途被服务器自己掐断。
-    from waitress.adjustments import Adjustments
+    try:
+        from waitress.adjustments import Adjustments
+    except ImportError:
+        return  # waitress absent: desktop-only dep (server deploys use gunicorn)
 
     assert m._waitress_channel_timeout == 3600 + 300
     adj = Adjustments(channel_timeout=m._waitress_channel_timeout)
