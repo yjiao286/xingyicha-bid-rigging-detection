@@ -76,7 +76,7 @@
 
 桌面版免 Python、免命令行。到
 [Releases 页面](https://github.com/yjiao286/xingyicha-bid-rigging-detection/releases)
-（当前最新 [v3.0.1](https://github.com/yjiao286/xingyicha-bid-rigging-detection/releases/tag/v3.0.1)）
+（当前最新 [v3.1.0](https://github.com/yjiao286/xingyicha-bid-rigging-detection/releases/tag/v3.1.0)）
 按操作系统下载对应附件：
 
 | 操作系统 / 环境 | 下载文件 | 安装方式 | 详细指南 |
@@ -168,7 +168,7 @@ python3 app.py --check
 
 ```bash
 ./venv/bin/python3 -c "import py_compile; py_compile.compile('app.py', doraise=True)"  # 语法检查
-./venv/bin/python3 tests/test_extraction.py      # 提取回归（251 例，无 pytest 依赖）
+./venv/bin/python3 tests/test_extraction.py      # 提取回归（255 例，无 pytest 依赖）
 ./venv/bin/python3 tools/replay_extraction.py <语料目录>   # 批量回放文本/人员/报价提取
 ```
 
