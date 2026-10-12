@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=星易查
+Name[zh_CN]=星易查
+GenericName=围串标风险识别系统
+GenericName[zh_CN]=围串标风险识别系统
+Comment=上传同一标段多份投标文件，本地五维度交叉分析，输出围标串标风险评分与报告
+Comment[zh_CN]=上传同一标段多份投标文件，本地五维度交叉分析，输出围标串标风险评分与报告
+Exec=/opt/xingyicha/start.sh
+Icon=/opt/xingyicha/share/icons/xingyicha.png
+Terminal=false
+Categories=Office;Utility;
+StartupNotify=true
+Keywords=招标;投标;围标;串标;风险;bid;rigging;

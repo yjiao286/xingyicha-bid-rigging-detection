@@ -1,0 +1,36 @@
+#!/bin/bash
+# 星易查 postinst（payload 单包方案）：
+#   1. tar 解包 payload（dpkg 只跟踪十几个文件，避开逐文件 fsync/KYSEC 风暴）
+#   2. 定向 KYSEC 标签：仅可执行文件（.so/ELF/脚本），而非全树
+#   3. 桌面/图标缓存刷新
+set -e
+
+case "$1" in
+  configure)
+    PAYLOAD=/opt/xingyicha.payload.tar.xz
+    if [ -f "$PAYLOAD" ]; then
+      mkdir -p /opt/xingyicha
+      tar -xJf "$PAYLOAD" -C /opt/xingyicha
+      rm -f "$PAYLOAD"
+    fi
+
+    # 银河麒麟 KYSEC 执行控制拦截"无可信标签"的可执行文件；
+    # 只标记真正会被 exec/mmap 的文件（.so / ELF / 脚本），约百个。
+    if command -v kysec_set >/dev/null 2>&1; then
+      LIST=$(mktemp)
+      find /opt/xingyicha -type f \( -name '*.so*' -o -name '*.sh' \
+            -o -name 'tray.py' -o -name 'antiword' -o -name 'python3*' \) \
+            > "$LIST" 2>/dev/null || true
+      kysec_set -n exectl -v verified -f "$LIST" >/dev/null 2>&1 || true
+      rm -f "$LIST"
+    fi
+
+    chmod 0755 /opt/xingyicha/run.sh /opt/xingyicha/start.sh \
+               /opt/xingyicha/bin/antiword /opt/xingyicha/bin/tray.py \
+               2>/dev/null || true
+    update-desktop-database -q /usr/share/applications 2>/dev/null || true
+    gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor 2>/dev/null || true
+    ;;
+esac
+
+exit 0

@@ -1,0 +1,20 @@
+Package: xingyicha
+Version: @VERSION@
+Section: office
+Priority: optional
+Architecture: amd64
+Depends: curl, xdg-utils
+Maintainer: yjiao286 <yjiao286@users.noreply.github.com>
+Homepage: https://github.com/yjiao286/xingyicha-bid-rigging-detection
+Description: 星易查 - 围串标风险识别分析系统
+ 上传同一标段的多份投标文件，本地完成提取与五维度交叉分析
+ （元数据/文本相似度/人员/报价/文档结构），自动输出围标串标风险
+ 评分、条款判定与 DOCX 综合报告。
+ .
+ 全流程本地运行、不依赖外部服务，适配内网离线环境（银河麒麟
+ V10 SP1 / 统信 UOS / 主流 x86_64 Linux，glibc >= 2.28）。
+ 内置独立 Python 运行时，安装后无需联网、无需系统 Python 依赖。
+ .
+ 本版新增：系统托盘角标（打开页面/打开数据目录/退出星易查），
+ 与 Windows/macOS 版交互对齐；托盘依赖系统 python3-gi +
+ libappindicator（麒麟预装，缺失时自动降级为纯终端模式）。

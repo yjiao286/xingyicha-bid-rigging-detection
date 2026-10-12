@@ -85,10 +85,15 @@
 | Windows（U盘/内网离线） | `XingYiCha-portable-<版本号>.zip` | 解压即用，双击 `星易查.exe` | 同上 |
 | macOS（M1–M4 Apple Silicon） | `XingYiCha-macOS-arm64-<版本号>.dmg` | 拖入 Applications；首次打开右键→打开放行 | [macOS部署.md](docs/macOS部署.md) |
 | macOS（Intel） | `XingYiCha-macOS-x86_64-<版本号>.dmg` | 同上 | 同上 |
-| Linux x86_64（Ubuntu/Debian 等主流发行版） | `XingYiCha-x86_64-<版本号>.AppImage` 或 `XingYiCha-linux-x86_64-<版本号>.tar.gz` | `chmod +x` 后运行 / 解压即用 | [Linux部署.md](docs/Linux部署.md) |
-| **银河麒麟 V10（x86_64：Intel/AMD/海光/兆芯）** | `XingYiCha-linux-x86_64-<版本号>.tar.gz`（推荐） | 见麒麟指南（glibc/KYLSEC/离线安装注意事项） | [银河麒麟部署.md](docs/银河麒麟部署.md) |
-| **银河麒麟 V10（aarch64：飞腾/鲲鹏/麒麟990）** | 暂无预编译产物 → 源码部署 | 麒麟指南第六节 | [银河麒麟部署.md](docs/银河麒麟部署.md) |
+| **银河麒麟 V10 x86_64（Intel/AMD/海光/兆芯）** | `XingYiCha-kylin-x86_64-<版本号>.deb`（推荐） | `sudo apt install` 一条命令，带托盘与开始菜单 | [银河麒麟部署.md](docs/银河麒麟部署.md) |
+| Linux x86_64（Ubuntu 22.04+/Debian 12 等新发行版） | `XingYiCha-x86_64-<版本号>.AppImage` 或 `XingYiCha-linux-x86_64-<版本号>.tar.gz` | `chmod +x` 后运行 / 解压即用（注意 glibc ≥ 2.35） | [Linux部署.md](docs/Linux部署.md) |
+| **银河麒麟 V10（aarch64：飞腾/鲲鹏/麒麟990）** | 暂无预编译产物 → 源码部署 | 麒麟指南源码部署节 | [银河麒麟部署.md](docs/银河麒麟部署.md) |
 | 服务器（任意系统） | 源码 + Docker | `docker compose up -d --build` | 仓库根目录 `docker-compose.yml` |
+
+> **老 Linux/麒麟发行版注意**：AppImage 与 tar.gz 构建于 Ubuntu 22.04
+> （glibc 2.35），银河麒麟 V10（glibc 2.31）等系统上会报
+> `GLIBC_2.34 not found`——这类系统请用上表的麒麟专用 `.deb`（自包含
+> 运行时，glibc ≥ 2.28 即可）。
 
 选机/采购前请先看 [硬件配置要求](docs/硬件配置要求.md)：OCR 为纯 CPU
 推理、无需显卡，内存是第一约束——最低 2 核 / 4GB，推荐 4 核 / 8GB 起。
@@ -103,7 +108,8 @@
 |------|--------------|--------------|--------------|----------|
 | Windows | 任务栏右下角托盘角标（无控制台窗口） | 双击角标 / 右键→打开页面 / 再双击桌面图标 | 右键角标→**打开数据目录** | 右键角标→退出星易查 |
 | macOS | Dock 图标 + 菜单栏右侧"星"状态项 | 点按 Dock 图标 / 再双击 .app | 菜单栏"星"→**打开数据目录** | 菜单栏"星"→退出 / Dock 右键→退出 |
-| Linux | 终端窗口 | 浏览器重新访问本机地址 | 直接访问 `~/.local/share/星易查/` | 关闭终端窗口 |
+| Linux 麒麟 .deb | 系统托盘角标（无终端窗口） | 托盘→打开页面 / 再点开始菜单图标 | 托盘→**打开数据目录** | 托盘→**退出星易查** |
+| Linux AppImage / tar.gz | 终端窗口 | 浏览器重新访问本机地址 | 直接访问数据目录 | 关闭终端窗口 |
 
 - 端口占用时自动改用 5002-5010；
 - v2.5.0 及更早的 macOS dmg 因打包问题不显示 Dock 图标，v3.0.0 起修复

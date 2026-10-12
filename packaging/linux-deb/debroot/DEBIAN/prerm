@@ -1,0 +1,8 @@
+#!/bin/bash
+# 星易查 prerm：移除/升级前停止正在运行的服务实例
+case "$1" in
+  remove|deconfigure|upgrade)
+    pkill -f '/opt/xingyicha/app/app\.py' 2>/dev/null || true
+    ;;
+esac
+exit 0

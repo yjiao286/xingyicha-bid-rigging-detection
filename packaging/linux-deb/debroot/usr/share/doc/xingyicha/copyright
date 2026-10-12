@@ -1,0 +1,10 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: xingyicha-bid-rigging-detection
+Source: https://github.com/yjiao286/xingyicha-bid-rigging-detection
+
+Files: *
+Copyright: 2026 yjiao286
+License: Apache-2.0
+ 全文见 /opt/xingyicha/LICENSE 或项目仓库。
+ 捆绑的 CPython（python-build-standalone，PSF 许可）与各依赖
+ wheel 的许可见 python/lib/python3.11/site-packages/*.dist-info。

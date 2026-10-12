@@ -1,0 +1,11 @@
+#!/bin/bash
+# 星易查 postrm：payload 方案下 /opt/xingyicha 的文件不归 dpkg 跟踪，
+# 彻底删除（purge）时由这里兜底清理；remove 时同样清掉（重装/降级由
+# postinst 重新解包 payload，旧目录残留无害但占 650MB 磁盘）。
+case "$1" in
+  remove|purge)
+    rm -rf /opt/xingyicha /opt/xingyicha.payload.tar.xz 2>/dev/null || true
+    update-desktop-database -q /usr/share/applications 2>/dev/null || true
+    ;;
+esac
+exit 0

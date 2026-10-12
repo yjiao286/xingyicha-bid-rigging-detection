@@ -1,0 +1,25 @@
+# 星易查 Linux .deb 构建依赖（银河麒麟 V10 适配包）
+#
+# 与 packaging/requirements-desktop.txt（PyInstaller 桌面版）的差异：
+#   - 去掉 pyinstaller：.deb 走"可重定位 CPython + wheel 展开"，不做冻结
+#   - 去掉 pyobjc（macOS）/ pystray（Windows）：托盘在 Linux 上由
+#     packaging/linux-deb/tray.py 走系统 python3-gi + libappindicator 实现，
+#     不随包捆绑任何 GUI 绑定
+#   - 保留 waitress（生产级 WSGI，与 Windows/macOS 桌面版一致）
+#   - 保留 pillow：rapidocr-onnxruntime 的运行时依赖（OCR 图片加载），
+#     同时是构建期图标生成器 make_icon.py 的依赖
+#
+# 构建：./build-deb.sh 会用 pip download --platform manylinux_2_28/2_17/2014
+# 下载 cp311 wheel（对应 python-build-standalone 3.11 运行时）。
+flask>=3.0
+python-docx>=1.0
+pypdf>=5.0
+olefile>=0.46
+openpyxl>=3.1
+pymupdf>=1.24
+pymupdf-layout>=1.28
+rapidocr-onnxruntime>=1.3; python_version < "3.13"
+rapidocr>=2.0; python_version >= "3.13"
+onnxruntime>=1.19; python_version >= "3.13"
+waitress>=3.0
+pillow>=10.0
