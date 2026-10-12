@@ -4022,6 +4022,32 @@ def t_ref_extract_failure_warns():
         assert '模板扣减未生效' in joined, joined
 
 
+def t_registered_capital_not_total_price():
+    """营业执照 OCR 的"注册资本人民币1000.0000万元整"曾被当成投标总价
+    （1000 万），并连带毒掉前面报价一览表的真实报价——实测服务类标书语料：
+    全文提取结果整体为 None，findings 报"未提取到任何报价"。排除词表
+    只写了 注册[资]*金（注册资金），匹配不上注册资本。"""
+    base = ('附件2\n二、报价一览表\n项 目 名 称：在线学习平台服务\n'
+            '单位：元（人民币）\n'
+            '序号 | 供应商名称 | 含税单价 | 税率 | 服务期限 | 备注\n'
+            '1 | 甲公司 | 小写：210元\n'
+            '大写：贰佰壹拾元整 | 6% | 1年 | /\n')
+    # 基线：无营业执照行时 210
+    r0 = m.extract_prices(base)
+    assert r0['totalPriceInTax'] == 210.0, r0['totalPriceInTax']
+    # 各种营业执照资本形态都不得顶掉总价
+    for poison in ('注册资本人民币1000.0000万元整\n',
+                   '注册资本人民币1000万元整\n',
+                   '注册资本人民币壹仟万元整\n',
+                   '实收资本人民币500万元整\n',
+                   '注册资金人民币800万元整\n'):
+        r = m.extract_prices(base + poison)
+        assert r['totalPriceInTax'] == 210.0, (poison.strip(), r['totalPriceInTax'])
+    # 正例：排除不能误伤真实报价前缀（'投标总价：人民币…'仍正常提取）
+    r2 = m.extract_prices('投标总价：人民币980000元\n税率：6%\n')
+    assert r2['totalPriceInTax'] == 980000.0, r2['totalPriceInTax']
+
+
 def main():
     # Tests must be hermetic: the extraction cache lives on disk between runs,
     # and a cached PDF extraction silently skips the very code path a test
