@@ -3915,6 +3915,49 @@ def t_price_cross_file_row_count_consensus():
     assert flagged2 == [], flagged2
 
 
+def t_generic_admin_account_not_scored():
+    """Administrator/Admin/管理员 是机器默认账户：跨标书同名不构成"同一人
+    编制"证据。元数据一致项与"最后修改人为同一人"均降为 info 不计分，
+    条款（一）不再因此给分；真人名（正例）仍按原强度计分。"""
+    import tempfile
+    from docx import Document
+
+    def mk(path, author, modifier):
+        d = Document()
+        d.core_properties.author = author
+        d.core_properties.last_modified_by = modifier
+        d.core_properties.template = 'Normal.dotm'
+        d.add_paragraph('正文内容。')
+        d.save(path)
+
+    with tempfile.TemporaryDirectory() as td:
+        p1 = os.path.join(td, '甲公司.docx')
+        p2 = os.path.join(td, '乙公司.docx')
+        mk(p1, 'Administrator', 'Admin')
+        mk(p2, 'Administrator', 'Admin')
+        res = m.run_full_analysis([p1, p2])
+        gen = [x for x in res['metadata']['matches'] if x['field'] in ('创建者', '最后保存者')]
+        assert gen, res['metadata']['matches']
+        assert all(x['severity'] == 'info' and '不计分' in x['verdict'] for x in gen), gen
+        cross = res['personnel']['cross_matches']
+        assert not any(x['type'] == '最后修改人为同一人' for x in cross), cross
+        assert any('通用账户' in x['type'] for x in cross), cross
+        assert '最后保存者一致' not in res['metadata']['findings']
+        c1 = next(c for c in res['verdict']['clauses'] if c['clause'] == '第（一）项')
+        assert not any('创建者' in e for e in c1.get('evidence', [])), c1
+
+        # 正例：同名真人修改人仍是 high 硬信号
+        p3 = os.path.join(td, '丙公司.docx')
+        p4 = os.path.join(td, '丁公司.docx')
+        mk(p3, '王大力', '王大力')
+        mk(p4, '李长河', '王大力')
+        res2 = m.run_full_analysis([p3, p4])
+        cross2 = res2['personnel']['cross_matches']
+        assert any(x['type'] == '最后修改人为同一人' and x['severity'] == 'high'
+                   for x in cross2), cross2
+        assert '最后保存者一致' in res2['metadata']['findings']
+
+
 def main():
     # Tests must be hermetic: the extraction cache lives on disk between runs,
     # and a cached PDF extraction silently skips the very code path a test

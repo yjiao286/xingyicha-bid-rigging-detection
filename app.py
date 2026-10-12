@@ -8253,6 +8253,19 @@ def run_full_analysis(filepaths, ref_filepaths=None, group_map=None, group_texts
     _progress('metadata', '元数据交叉比对', 80, f'交叉比对 {len(out_names)} 份标书的创建者、修改者、编辑程序等')
 
     # ── Helper: filter out software/application names from metadata matching ──
+    # Generic system account names (Windows defaults etc.): present on almost
+    # every machine, so a shared value is not evidence the same person
+    # authored two bids. Normalized by strip + lowercase + trailing ./_
+    # removal; variants someone deliberately picked (admin123) stay scored.
+    _GENERIC_ACCOUNTS = {
+        'administrator', 'admin', 'system', 'user', 'guest', 'default',
+        '管理员', '用户', '来宾', '默认',
+    }
+
+    def _is_generic_account(val):
+        v = str(val or '').strip().lower().rstrip('._')
+        return v in _GENERIC_ACCOUNTS
+
     def _is_software_name(val):
         """Check if a metadata value is a software/application name, not a person."""
         if not val:
@@ -8333,6 +8346,9 @@ def run_full_analysis(filepaths, ref_filepaths=None, group_map=None, group_texts
                     vj = mj.get(key, '')
                     if vi and vj and vi == vj:
                         is_soft = _is_software_name(vi) if key in ('application', 'last_modified_by', 'creator') else False
+                        # creator/last_modified_by = Administrator/Admin/管理员 …
+                        # is a machine default, not a person — never scored.
+                        is_generic = key in ('last_modified_by', 'creator') and _is_generic_account(vi)
                         dedup_key = f'{label}|{vi}'
                         if dedup_key not in all_pairs_done:
                             all_pairs_done.add(dedup_key)
@@ -8340,8 +8356,9 @@ def run_full_analysis(filepaths, ref_filepaths=None, group_map=None, group_texts
                                 'field': label,
                                 'value': str(vi)[:200],
                                 'pair': pair_label,
-                                'verdict': '软件名称一致（不计分）' if is_soft else '完全一致',
-                                'severity': 'info' if is_soft else (
+                                'verdict': ('软件名称一致（不计分）' if is_soft else
+                                            '通用账户一致（不计分）' if is_generic else '完全一致'),
+                                'severity': 'info' if (is_soft or is_generic) else (
                                     'high' if key in ('KSOTemplateDocerSaveRecord', 'last_modified_by') else 'medium'
                                 )
                             })
@@ -8520,10 +8537,13 @@ def run_full_analysis(filepaths, ref_filepaths=None, group_map=None, group_texts
                         if key not in personnel_dedup:
                             personnel_dedup.add(key)
                             is_soft = _is_software_name(mi['last_modified_by'])
+                            is_generic = _is_generic_account(mi['last_modified_by'])
                             personnel_matches.append({
-                                'type': '最后修改人为同一人（软件名，不计分）' if is_soft else '最后修改人为同一人',
+                                'type': ('最后修改人为同一人（软件名，不计分）' if is_soft else
+                                         '最后修改人为同一人（通用账户，不计分）' if is_generic else
+                                         '最后修改人为同一人'),
                                 'detail': f'"{mi["last_modified_by"]}"同时为 {gi} 和 {gj} 的最后修改人',
-                                'severity': 'info' if is_soft else 'high'
+                                'severity': 'info' if (is_soft or is_generic) else 'high'
                             })
 
                 # ── Layer 6: Personnel overlap rate ──
@@ -9036,7 +9056,8 @@ def run_full_analysis(filepaths, ref_filepaths=None, group_map=None, group_texts
             'matches': meta_matches,
             'findings': time_findings + list(filter(None, [
                 'KSOProductBuildVer一致: 同一WPS版本' if any(m['field'] == 'KSOProductBuildVer' for m in meta_matches) else '',
-                '最后保存者一致' if any(m['field'] == '最后保存者' for m in meta_matches) else '',
+                '最后保存者一致' if any(m['field'] == '最后保存者' and m.get('severity') != 'info'
+                                        for m in meta_matches) else '',
             ]))
         },
         'personnel': {
