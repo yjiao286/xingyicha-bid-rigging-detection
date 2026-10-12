@@ -3958,6 +3958,70 @@ def t_generic_admin_account_not_scored():
         assert '最后保存者一致' in res2['metadata']['findings']
 
 
+def t_form_scaffolding_listing_template():
+    """招标人统一报价格式（表头列名/表单标签/项目名称值）主导的段落判
+    模板，不再进高风险——实测锅炉供油语料：项目名+分项报价表表头块（105字）
+    曾以实质评分 0.61 判"可能高风险异常段落"。含实质选项的行与真实条款
+    散文不受影响（负样本）。"""
+    # 正例 1：项目名 + 分项报价表表头（锅炉供油语料形态，管道表）
+    pos1 = ('2.分项报价表\n'
+            '2026-2027年度某工业区冬季采暖锅炉供油采购项目\n'
+            '单位：人民币元\n'
+            '序号|货物名称|品牌|产地|主要技术指标|数量|单位|发改委指导价\n'
+            '（元/吨）|投标单价（元/吨）|优惠幅度（%，下浮幅度）|备注')
+    # 正例 2：资格审查表单标签（15 字短段）
+    pos2 = '7\n近三年营业额 | 2023年: 1'
+    # 正例 3：PDF 文本层无管道的表头（归一化后空白全无）
+    pos3 = ('序号 货物名称 品牌 产地 主要技术指标 数量 单位 '
+            '发改委指导价（元/吨） 投标单价（元/吨） 优惠幅度 备注')
+    for pos in (pos1, pos2, pos3):
+        assert m._is_form_scaffolding_listing(pos), pos[:30]
+        assert m.is_template_content(pos), pos[:30]
+
+    # 负例 1：真实服务期限条款（日期数字多但主体是散文）
+    neg1 = ('重庆餐厅服务期限为2026年11月28日至2029年9月10日，合同开始日期'
+            '以甲方正式通知为准，用餐保障安排在进场后十天内完成人员培训及配备。')
+    # 负例 2：含报价词的真实条款（抄招标文件的改写段也必须保留判定权）
+    neg2 = ('我方投标报价中的单价与总价均已按招标文件要求如实填写，投标总价'
+            '包含完成本项目全部服务内容所需的费用及税费，投标人确认无误。')
+    # 负例 3：表头+实质选项值混合行（品牌/产地是投标人的选择，保留）
+    neg3 = '1|-10#柴油|甲石化|北京|-10#柴油（国VI）技术性能指标|8500|8200|3.5'
+    for neg in (neg1, neg2, neg3):
+        assert not m._is_form_scaffolding_listing(neg), neg[:30]
+
+    # 端到端：配对通道走 Filter 1c，理由为"报价格式表头罗列"，风险级别模板。
+    # 两家的数值行不同（品牌/产地/价格是投标人自己的选择），公共段止于表头块。
+    import tempfile
+    head = '投标文件\n' + pos1 + '\n1|-10#柴油|'
+    doc1 = head + '甲石化|河北|技术指标满足|8500|8200|3.5\n以上内容以投标人实际填报为准，特此说明。'
+    doc2 = head + '乙石油|山东|技术指标满足|8600|8300|3.4\n本表填写内容真实有效，特此承诺。'
+    res = m.text_similarity_analysis({'甲公司.txt': doc1, '乙公司.txt': doc2})
+    hit = [x for x in res['pair_results'][0]['matches'] if '序号' in x['text']]
+    assert hit, res['pair_results'][0]['matches'][:3]
+    assert all(x['risk_level'] == 'template' for x in hit), hit
+    assert all(any('报价格式' in r for r in x['reasons']) for x in hit), hit
+    assert res['form_listing_count'] >= 1, res['form_listing_count']
+
+
+def t_ref_extract_failure_warns():
+    """参照文件提取失败（路径不存在/解析异常/正文为空）不得静默——模板
+    扣减整层失效时 findings 必须告警，提示结果可能偏高。"""
+    import tempfile
+    body = '投标文件正文内容。投标报价：小写：980000元。技术服务方案描述。' * 3
+    with tempfile.TemporaryDirectory() as td:
+        p1 = os.path.join(td, '甲公司.txt')
+        p2 = os.path.join(td, '乙公司.txt')
+        with open(p1, 'w', encoding='utf-8') as f:
+            f.write(body)
+        with open(p2, 'w', encoding='utf-8') as f:
+            f.write(body)
+        res = m.run_full_analysis(
+            [p1, p2], ref_filepaths=[os.path.join(td, '不存在的参照.doc')])
+        joined = ' '.join(str(x) for x in res['text_similarity'].get('findings', []))
+        assert '参照文件未能提取正文' in joined, joined
+        assert '模板扣减未生效' in joined, joined
+
+
 def main():
     # Tests must be hermetic: the extraction cache lives on disk between runs,
     # and a cached PDF extraction silently skips the very code path a test

@@ -6962,6 +6962,82 @@ def _is_standard_listing(text):
     return False
 
 
+# ── Tender-given form / price-table scaffolding (Filter 1c / Category 9) ──
+# 招标人在招标文件里统一给出的报表格式：分项报价表表头（序号|货物名称|
+# 品牌|产地|…|发改委指导价（元/吨）|投标单价（元/吨）|优惠幅度|备注）、
+# 资格审查表单标签（近三年营业额|2023年）、项目名称填入值。这些内容
+# 每家投标人必然一致——是招标人规定的格式，不是共同编制的证据。
+# 实测锅炉供油语料：表头块（105 字，项目名+列名+单位注释）曾以实质评分
+# 0.61 判成"可能高风险异常段落"。与 _is_standard_listing 同构：按
+# 脚手架词汇+形态（数字/年份/括号单位注记）覆盖占比判定，占比门槛取
+# 更高的 0.75——含实质选项（品牌、产地值、参数选择）的行到不了门槛，
+# 仍走正常评分。
+_FORM_SCAFFOLD_TERMS = [
+    # 报价/货物表列名
+    '序号', '货物名称', '品名', '名称及规格', '品牌', '产地', '原产地',
+    '生产厂家', '制造商', '主要技术指标', '技术指标', '技术参数',
+    '规格型号', '规格', '型号', '数量', '单位', '备注',
+    '交货期', '交货时间', '交货地点', '供货期', '供货周期', '包装方式',
+    '投标单价', '单价', '总价', '合价', '合计', '小计',
+    '优惠幅度', '下浮幅度', '下浮率', '优惠率', '折扣率', '费率', '税率',
+    '指导价', '发改委指导价', '预算价', '预算单价', '控制价', '限价',
+    '最高限价', '招标控制价', '暂估价', '暂定价',
+    '大写', '小写', '金额', '报价表', '分项报价表', '报价明细表',
+    '投标报价表', '开标一览表', '报价一览表',
+    # 资格/商务表单标签
+    '项目名称', '工程名称', '标段名称', '标段', '包号', '标包', '包件',
+    '招标编号', '比选编号', '采购编号', '磋商编号', '谈判编号',
+    '招标人', '采购人', '投标人', '供应商', '投标单位', '响应单位',
+    '联系人', '联系电话', '联系方式', '电话', '地址', '邮政编码', '邮编',
+    '法定代表人', '授权代表', '委托代理人', '授权委托人',
+    '近三年营业额', '年营业额', '营业额', '年营业收入', '财务状况',
+    '资质等级', '证书编号', '有效期', '注册资本', '成立时间',
+    # 计量/署名通用词
+    '人民币', '盖章', '签字', '日期',
+]
+_FORM_SCAFFOLD_RES = [
+    # 项目名称填入值（'2026-2027年度XX工业区XX采购项目'）——同一项目
+    # 的所有标书必含同一串，单独或作为表头块前缀都不构成共现证据
+    re.compile(r'\d{2,4}[-—–~至]\d{2,4}年度?[^，。；|\n]{2,40}?(?:项目|工程|标段|包件|标包)'),
+    re.compile(r'\d{4}年度?(?![\d])'),
+    re.compile(r'[（(][^（）()]{1,12}[）)]'),   # （元/吨）（%，下浮幅度）
+    re.compile(r'元[/／][^，。；|\n]{1,6}'),    # 裸单位 元/吨
+    re.compile(r'\d+(?:[.,:/年月日时分秒-]*\d+)*'),  # 数字/日期/编号串
+    re.compile(r'[％%]'),
+]
+_FORM_SCAFFOLD_MIN_COVER = 12
+_FORM_SCAFFOLD_RATIO = 0.75
+
+
+def _is_form_scaffolding_listing(text):
+    """True when the segment is dominated by tender-given table/form
+    scaffolding tokens (price-table column headers, form labels, project
+    name values, unit annotations, bare numbers). Callers treat True as
+    template content."""
+    if not text:
+        return False
+    t = _normalize_for_match(text)
+    if len(t) < 10:
+        return False
+    covered = bytearray(len(t))
+    for w in _FORM_SCAFFOLD_TERMS:
+        wn = _normalize_for_match(w)
+        start = 0
+        while True:
+            i = t.find(wn, start)
+            if i < 0:
+                break
+            for k in range(i, i + len(wn)):
+                covered[k] = 1
+            start = i + 1
+    for rx in _FORM_SCAFFOLD_RES:
+        for mt in rx.finditer(t):
+            for i in range(mt.start(), mt.end()):
+                covered[i] = 1
+    cov = sum(covered)
+    return cov >= _FORM_SCAFFOLD_MIN_COVER and cov / len(t) >= _FORM_SCAFFOLD_RATIO
+
+
 def is_template_content(text):
     """Check if text is likely a standard template/bid instruction phrase.
     Expanded to cover all lengths and common bid document boilerplate patterns."""
@@ -7083,6 +7159,11 @@ def is_template_content(text):
     # ── Category 8: Standard / certificate register listing ──
     # 国标/认证编号 + 《…标准》名称 + 认证登记词汇主导的段落（详见 _is_standard_listing）。
     if _is_standard_listing(text_stripped):
+        return True
+
+    # ── Category 9: Tender-given form / price-table scaffolding ──
+    # 招标人统一报价格式（表头列名/表单标签/项目名称值）主导的段落。
+    if _is_form_scaffolding_listing(text_stripped):
         return True
 
     return False
@@ -7445,6 +7526,7 @@ def text_similarity_analysis(texts_dict, ref_texts_list=None, on_progress=None,
         'rule_template_count': 0,
         'ref_derived_count': 0,
         'std_listing_count': 0,
+        'form_listing_count': 0,
     }
 
     # Normalise the reference documents once, up front. _is_in_reference runs
@@ -7555,6 +7637,24 @@ def text_similarity_analysis(texts_dict, ref_texts_list=None, on_progress=None,
                         'text': sanitize_text(seg_text[:300]),
                         'abnormal': False, 'risk_level': 'template',
                         'reasons': ['标准/认证编号罗列（GB/ISO/认证证书等通用合规内容）— 非异常一致'],
+                        'pos1': pos1, 'pos2': pos2,
+                        'page1': page1, 'pct1': pct1,
+                        'page2': page2, 'pct2': pct2,
+                        'ctx1': sanitize_text(ctx1[:400]),
+                        'ctx2': sanitize_text(ctx2[:400])
+                    })
+                    continue
+
+                # ── Filter 1c: Tender-given form / price-table scaffolding ──
+                if _is_form_scaffolding_listing(seg_text):
+                    pair_result['template_count'] += 1
+                    results['template_matches'] += 1
+                    results['form_listing_count'] += 1
+                    pair_result['matches'].append({
+                        'index': idx + 1, 'length': length,
+                        'text': sanitize_text(seg_text[:300]),
+                        'abnormal': False, 'risk_level': 'template',
+                        'reasons': ['报价格式表头罗列（招标人统一格式，各投标人必然一致）— 非异常一致'],
                         'pos1': pos1, 'pos2': pos2,
                         'page1': page1, 'pct1': pct1,
                         'page2': page2, 'pct2': pct2,
@@ -7780,9 +7880,12 @@ def text_similarity_analysis(texts_dict, ref_texts_list=None, on_progress=None,
     total_std = results['std_listing_count']
     if total_std > 0:
         filter_parts.append(f'{total_std} 处标准/认证编号罗列')
+    total_form = results['form_listing_count']
+    if total_form > 0:
+        filter_parts.append(f'{total_form} 处报价格式表头罗列')
     if total_template > 0:
         filter_parts.append(
-            f'{total_template - total_global - total_rule - total_derived - total_std} 处其他模板')
+            f'{total_template - total_global - total_rule - total_derived - total_std - total_form} 处其他模板')
     if filter_parts:
         results['findings'].append(f'模板过滤: {"、".join(filter_parts)} 已排除')
 
@@ -8188,6 +8291,7 @@ def run_full_analysis(filepaths, ref_filepaths=None, group_map=None, group_texts
     # 2b. Text extraction — reference documents
     ref_texts = []
     ref_filenames = []
+    _ref_failed = []
     if ref_filepaths:
         for rfp in ref_filepaths:
             try:
@@ -8196,10 +8300,19 @@ def run_full_analysis(filepaths, ref_filepaths=None, group_map=None, group_texts
                 if rt:
                     ref_texts.append(rt)
                     ref_filenames.append(os.path.basename(rfp))
+                else:
+                    _ref_failed.append(os.path.basename(rfp))
             except AnalysisCancelled:
                 raise
             except Exception:
-                pass
+                # 静默跳过会让模板扣减整层失效（查重结果整体偏高）而用户
+                # 毫无知觉——典型场景：.doc 参照文件在没装 LibreOffice 的
+                # 机器上提取为空。失败必须以 findings 告警浮出。
+                _ref_failed.append(os.path.basename(rfp))
+    if _ref_failed:
+        _progress('similarity', '文本相似度分析', 42,
+                  '⚠ 参照文件未能提取正文（' + '、'.join(_ref_failed) +
+                  '），招标文件模板扣减未生效，结果可能偏高')
 
     # Use display_names (group names) for all comparison outputs
     out_names = display_names
@@ -8221,6 +8334,11 @@ def run_full_analysis(filepaths, ref_filepaths=None, group_map=None, group_texts
         all_text, ref_texts,
         on_progress=lambda pct, d='': _progress('similarity', '文本相似度分析', pct, d),
         cancel_event=cancel_event, page_maps=group_page_maps)
+    if _ref_failed:
+        similarity.setdefault('findings', []).append(
+            '⚠ 参照文件未能提取正文（' + '、'.join(_ref_failed) +
+            '）——招标文件模板扣减未生效，相似度结果可能偏高；'
+            '请安装 .doc 转换器（LibreOffice/antiword）或改用 .docx/.pdf 参照文件后重新分析')
 
     # 6. Structure
     all_structure = {}
