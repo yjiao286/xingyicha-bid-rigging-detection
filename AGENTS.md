@@ -251,6 +251,24 @@ near-dup 比对本身都不是瓶颈，cProfile 显示 97.4/98.5s 全在 `find_c
 对照：`find_common_segments` 内的重复归一化只有 7.6s/82s（8%）且改造要穿过 swapped 轮转
 与百万级 pos 映射内存（需 array('i')），**不值得改**——已评估并放弃。
 
+第三轮（窄带手持真实语料，2026-10-12，四处纯等价重写，窄带批次相似度 0.47s → 0.25s、
+数据采集批次 0.147s → 0.082s，两批次结果 JSON 逐字段一致）：
+①`_normalize_for_match` 由逐字符 Python 循环改为**单次 `str.translate`**（删除+折叠合一张
+表 `_SKIP_FOLD_XLAT`，模块加载时建表 2ms；它是全阶段共享热点——每对 20 万次调用、140 万次
+`_is_skip_char`，单点占阶段 40%；实测 3.4×，语料+边界串逐字节一致。Python 的 isspace 即
+Unicode Zs/Zl/Zp + C0/C1 控制，全在 BMP，range(0x10000) 扫描即完整枚举；删除键与折叠键
+不相交、折叠目标不含空白，故删除+折叠合单趟与先删后折等价）；②`_FORM_SCAFFOLD_TERMS`（99
+词）与 `_CERT_WORD_RE_LIST`（39 词）**预归一化**成常量元组（每对省 ~73ms，词表是常量）；
+③`_find_near_duplicate_paragraphs` 的 `SequenceMatcher` **按 seq2 复用**（b2j 缓存在 seq2
+侧，原来每对候选新建 matcher，单对 4321 次构造；norm1 走 `set_seq1`，2.3×，28 条结果逐条
+相等）；④过滤器链 `seg_norm` **一次计算贯穿**（`_is_in_reference`/`_ref_derived`/两个
+listing/`is_template_content`/`_is_in_global_template` 全部加可选 `norm` 参数，原来同一段
+最多归一化 5 次；首个过滤器反正需要它，前移永不亏）。另：`_build_normalized_map` 输出与
+k-gram 索引按文档 memo（`find_common_segments` 加 `prep1/prep2/index_cache` 可选参数，
+索引以 norm 字符串 id 为键、FIFO 上限 `_PAIR_INDEX_CACHE_MAX=4` 兜内存——大文档索引每份
+数十 MB；6 文档 15 对 + 逐出路径验证结果同哈希）。上轮"不值得改"的判断作废了一半：pos
+映射内存问题仍在，但 memo 绕开了它（每文档只算一次，无需换存储结构）。
+
 ### Extraction Performance（缓存 + 并行）
 
 提取是全线最贵的阶段（实测 5 份标书 4287 页：提取 40.3s / 相似度 2.3s / 人员+报价 1.6s），两项优化都不改变输出，都有独立的测试覆盖。
