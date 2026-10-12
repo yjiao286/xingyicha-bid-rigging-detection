@@ -10,6 +10,7 @@ name: 桌面版三平台构建
 #   Windows: 星易查-Setup.exe + 星易查-便携版.zip   (XingYiCha-Setup-<ver>.exe / XingYiCha-portable-<ver>.zip)
 #   Linux:   星易查-linux-x86_64.tar.gz + XingYiCha-x86_64-<ver>.AppImage
 #   macOS:   XingYiCha-macOS-arm64-<ver>.dmg/.zip + XingYiCha-macOS-x86_64-<ver>.dmg/.zip
+#   麒麟:    XingYiCha-kylin-x86_64-<ver>.deb（银河麒麟 V10 专用，独立 job）
 
 on:
   workflow_dispatch:
@@ -219,3 +220,67 @@ jobs:
           # 文件名含版本后缀（XingYiCha-Setup-<ver>.exe 等），用通配符；
           # onedir 目录名是 dist/XingYiCha（无连字符），不会被此 glob 误收
           path: dist/XingYiCha-*
+
+  # ── 银河麒麟 V10 专用 .deb ────────────────────────────────────
+  # 不复用上面 PyInstaller 产物（ubuntu-22.04 冻结件 glibc 2.35，麒麟 V10 是
+  # glibc 2.31 跑不起来）；build-deb.sh 改用 python-build-standalone（glibc
+  # 2.17+）+ manylinux≤2.28 wheel 组装。构建宿主只做下载/展开/自检（无编译
+  # 链接），产物兼容性由预编译件自身决定、与宿主 glibc 无关，故 ubuntu-22.04
+  # runner 构建与在麒麟本机构建等效。此前该包为手动构建（v3.1.0 起入 Release）。
+  kylin-deb:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Derive version from app.py
+        shell: bash
+        run: |
+          VER=$(sed -n "s/^APP_VERSION = '\([^']*\)'.*/\1/p" app.py | head -n1)
+          if [ -z "$VER" ]; then
+            echo "ERROR: APP_VERSION not found in app.py"; exit 1
+          fi
+          echo "APP_VERSION=$VER" >> "$GITHUB_ENV"
+          echo "version: $VER"
+
+      # 只缓存可复用件（可重定位 Python、wheelhouse、PBS tarball、antiword
+      # deb）；pkg/debroot 等一次性组装目录不入缓存。脚本对缓存幂等：python/
+      # wheelhouse 已在就跳过下载。requirements 或构建脚本变更时键自动失效。
+      - name: Cache deb build deps
+        uses: actions/cache@v7
+        with:
+          path: |
+            build/cache/deb/python
+            build/cache/deb/wheelhouse
+            build/cache/deb/cpython-x86_64.tar.gz
+            build/cache/deb/antiword_*.deb
+          key: kylin-deb-${{ hashFiles('packaging/linux-deb/requirements-deb.txt', 'packaging/linux-deb/build-deb.sh') }}
+
+      - name: Build kylin .deb
+        run: packaging/linux-deb/build-deb.sh 1
+
+      - name: Copy to release name
+        run: cp "dist/xingyicha_${APP_VERSION}-1_amd64.deb" "dist/XingYiCha-kylin-x86_64-${APP_VERSION}.deb"
+
+      - name: Upload to GitHub Release directly
+        if: startsWith(github.ref, 'refs/tags/') || inputs.release_tag != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+        run: |
+          # 与 4 平台 job 并发：release 已存在则直接上传，不存在则抢先创建（败者容忍）
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 \
+            || gh release create "$RELEASE_TAG" --title "$RELEASE_TAG" --generate-notes \
+            || true
+          gh release upload "$RELEASE_TAG" dist/XingYiCha-kylin-x86_64-*.deb --clobber
+
+      - name: Upload artifact (manual runs only)
+        if: github.event_name == 'workflow_dispatch' && inputs.release_tag == ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: 星易查-kylin-x86_64
+          retention-days: 1
+          if-no-files-found: error
+          path: dist/XingYiCha-kylin-x86_64-*.deb
