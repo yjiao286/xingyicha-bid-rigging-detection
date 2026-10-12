@@ -247,8 +247,9 @@ jobs:
       # 只缓存可复用件（可重定位 Python、wheelhouse、PBS tarball、antiword
       # deb）；pkg/debroot 等一次性组装目录不入缓存。脚本对缓存幂等：python/
       # wheelhouse 已在就跳过下载。requirements 或构建脚本变更时键自动失效。
+      # 注：cache 无 v7（各 action 版本独立），最新主版本是 v4。
       - name: Cache deb build deps
-        uses: actions/cache@v7
+        uses: actions/cache@v4
         with:
           path: |
             build/cache/deb/python
