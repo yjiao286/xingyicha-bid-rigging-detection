@@ -2776,6 +2776,30 @@ def _chmod_x(path):
         pass
 
 
+_SH_EXEC_PROBE = None
+
+
+def _sh_scripts_execable():
+    """麒麟 KYSEC（三权分立）下新建脚本默认禁止执行——/tmp 里刚写好的假
+    转换器一跑就是 exit 127（kysec_set 打标也不放行）。这类用 sh 假工具的
+    测试在这类机器上只能跳过，与 os.name == 'nt' 的处理同理。探一次记结果。"""
+    global _SH_EXEC_PROBE
+    if _SH_EXEC_PROBE is None:
+        import subprocess
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            probe = os.path.join(td, 'probe.sh')
+            with open(probe, 'w') as f:
+                f.write('#!/bin/sh\nexit 0\n')
+            _chmod_x(probe)
+            try:
+                _SH_EXEC_PROBE = subprocess.run(
+                    [probe], timeout=15).returncode == 0
+            except OSError:
+                _SH_EXEC_PROBE = False
+    return _SH_EXEC_PROBE
+
+
 def t_soffice_probe_paths_per_os():
     # 每个平台的已知安装位置必须是纯数据（不碰文件系统），否则 Windows /
     # Linux 分支在这台机器上根本无法回归。路径一律用 ntpath/posixpath 拼，
@@ -2959,6 +2983,8 @@ def t_doc_libreoffice_failure_falls_back_to_text_tool():
     # 文档——而这正是"探测面扩大 + 优先 LibreOffice"之后新可达的形态。
     if os.name == 'nt':
         return                    # 用 sh 脚本做假转换器，POSIX 专属
+    if not _sh_scripts_execable():
+        return                    # 麒麟 KYSEC 拦截新建脚本执行，假转换器跑不起来
     import tempfile
     with tempfile.TemporaryDirectory() as td:
         doc = os.path.join(td, 'x.doc')
@@ -4052,6 +4078,34 @@ def t_registered_capital_not_total_price():
     # 正例：排除不能误伤真实报价前缀（'投标总价：人民币…'仍正常提取）
     r2 = m.extract_prices('投标总价：人民币980000元\n税率：6%\n')
     assert r2['totalPriceInTax'] == 980000.0, r2['totalPriceInTax']
+
+
+def t_no_emoji_glyphs_in_ui_or_reports():
+    """银河麒麟等环境没有彩色 emoji 字体（不带 Noto Color Emoji），界面/报告
+    里的 emoji 字符（红圆、票据、日历、警告三角等）渲染成空白或豆腐块。
+    2026-10 用户实测：麒麟桌面版红圆"高风险异常段落"、票据"人员信息对比"、
+    日历历史条目图标全部消失。此后用户可见文案一律不用字符 emoji：
+    前端走 main.js 的 ico()/dot()（内联 SVG/CSS 圆点），报告/后端文案用
+    纯文字。本守卫扫全部用户可见产物的源文件，防止 emoji 再混回来。
+    制表符/数学符号（─═→≥≈）与几何三角（▶▼）字体覆盖充分，不在禁用范围。"""
+    import pathlib
+    pat = re.compile('[\U0001F000-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF\uFE0F\u2139]')
+    root = pathlib.Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    targets = [
+        root / 'app.py',
+        root / 'templates' / 'index.html',
+        root / 'static' / 'js' / 'main.js',
+        root / 'static' / 'css' / 'style.css',
+        root / 'packaging' / 'linux-deb' / 'run.sh',
+        root / 'launch.sh',
+    ]
+    for p in targets:
+        text = p.read_text(encoding='utf-8')
+        hit = pat.search(text)
+        assert not hit, (
+            f'{p.name} 含 emoji 字符 U+{ord(hit.group(0)):04X}（第 '
+            f'{text[:hit.start()].count(chr(10)) + 1} 行附近）——麒麟无 emoji '
+            '字体会显示为空白；前端请用 main.js 的 ico()/dot()，后端文案用纯文字')
 
 
 def main():

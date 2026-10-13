@@ -125,6 +125,7 @@ Windows 下 `tar.exe`（bsdtar）按系统 ANSI 代码页解析参数，含中�
 - `static/css/style.css` — 所有样式（含统计页：KPI 卡片、SVG 环图/趋势图/维度条形图、最近记录表）
 - `static/js/main.js` — 所有前端逻辑（文件上传、流式 NDJSON 进度——含 `pdf_ocr`/`pdf_ocr_start` 扫描件 OCR 进度阶段、结果渲染——含费率报价（`bidRate`）与多值联系人就展示、报告下载、`renderStats()` 统计视图）。相似度页：每处匹配卡带双方页码/位置徽标（`.text-match-loc`，PDF 显示「文件 第X页」、Word 显示「≈X%处」），定位弹窗标题同步标注；人员交叉页：KPI stat-cards（严重度 chips 点击过滤异常卡）+ 各标书属性合并对比表（按原始值判定共享高亮、身份证/银行账号打码点击显示）、人员交叉矩阵（类型过滤 chips、悬停共享行列高亮）+ 按严重度分组可筛选的异常卡片；报价页：KPI 概览卡（文件数/最高/最低/价差%）+ 横向条形图（相同报价标红、缺失键文件以 — 展示且不参与比对）+ 明细表（含费率/下浮率行、数字右对齐等宽、万元换算副行、同值高亮）+ 分项卡可折叠（风险徽标卡默认展开；完全一致/等差数列/高度接近）
 - 图表全部为手写 SVG（无 CDN 依赖，适配内网离线部署）；统计数据来自 `GET /api/stats`
+- **界面图标一律内联 SVG，禁止字符 emoji**（2026-10 麒麟实测）：银河麒麟不带 Noto Color Emoji，红圆"高风险异常段落"/票据"人员信息对比"/日历历史条目等全部渲染成空白。JS 侧用 `main.js` 顶部的 `ICO` 表 + `ico(name)`（描边=currentColor、尺寸 1em，`.ico` 类在 style.css），🔴/🟡/⚪ 一类状态点用 `dot('d'/'w'/'g')`（`.ico-dot` CSS 圆点，无参=currentColor）；index.html 静态处直接写 `<svg class="ico">`；style.css 进度条 ✓ 对勾为 CSS border 绘制；后端 findings/进度文案与 `launch.sh`/`run.sh` 终端横幅用纯文字（⚠ 等符号同样会缺字形）。守卫：`t_no_emoji_glyphs_in_ui_or_reports` 扫 app.py/模板/JS/CSS/两个启动脚本禁用 emoji 区段（U+1F000-1FAFF、U+2600-27BF、U+2B00-2BFF、FE0F、U+2139）；制表/数学符号（─═→≥）与几何三角（▶▼）字体覆盖充分、允许。附带修复：`showWarning` 去重比较改 `dataset.msg`（原 `textContent === message` 恒不等、警告会重复堆叠）、`renderPaginated` 的 labelId 生成先剥 HTML 标签（label 含 SVG 后字母会漏进 DOM id）
 - 整体流程图（`output/整体流程图mermaid.md` 源 + 根目录 `整体流程图.png` 渲染产物，README 引用）：判定逻辑、条款权重或维度增删时**须同步更新**，曾有流程图权重与代码不一致的回归
 
 ### 文件格式支持
@@ -161,7 +162,7 @@ Windows 下 `tar.exe`（bsdtar）按系统 ANSI 代码页解析参数，含中�
 - `MAX_PDF_PAGES`：0 = 不限页数（默认）；`MAX_FILE_SIZE_MB=300`/`MAX_TOTAL_SIZE_MB=500` 仅 UI 警告不阻止
 - `requirements.txt`：flask, python-docx, pypdf, gunicorn, olefile, openpyxl（xlsx）, pymupdf + rapidocr-onnxruntime（扫描件 OCR 回退）, pymupdf-layout（表格版面分析增强，精确锁 PyMuPDF==1.28.2，可选缺失降级）
 - Docker 镜像基于 `python:3.11-slim`，另安装 `antiword` + `libgl1`（opencv 运行时依赖）+ `fonts-noto-cjk`（OCR 中文字形）
-- 离线验证：`tools/replay_extraction.py <语料目录>` 批量回放文本/人员/报价提取（报告固定写到当前目录 `replay_report.json`）；`tests/test_extraction.py` 单元样本回归（251 例，纯 assert 无 pytest 依赖，`t_*` 函数自动发现）
+- 离线验证：`tools/replay_extraction.py <语料目录>` 批量回放文本/人员/报价提取（报告固定写到当前目录 `replay_report.json`）；`tests/test_extraction.py` 单元样本回归（256 例，纯 assert 无 pytest 依赖，`t_*` 函数自动发现）。麒麟 KYSEC 开发机注意：新建脚本（含测试临时写的假转换器）默认禁止执行，`t_doc_libreoffice_failure_falls_back_to_text_tool` 靠 `_sh_scripts_execable()` 探测后跳过；本机 venv 若从 macOS 拷贝而来（`venv/bin/python` 断链）可用已装 deb 的 `/opt/xingyicha/python/bin/python3` 跑
 - 分析结果字段：`pricing.files[].bidRate`（费率/下浮率报价）；`personnel.files[].phones[]/id_numbers[]/emails[]`（多值联系池，前端与 .docx 报告均已展示）；顶层 `project_name`（跨文档投票提取的项目名——标签正则含"项目名称/工程名称/标段名称"等，值经引号书名号剥离/填空下划线剔除/标签词与日期值过滤，≥2 份文档一致优先；`_prepare_history_data` 保留顶层键，旧历史记录缺失时报告命名自动退化）。报告下载名：`围串标风险识别分析报告_[项目名_]判定等级_YYYYMMDD_HHMMSS.docx`（前端优先取 Content-Disposition 的服务端文件名）
 
 ### 围串标信号检测修复（工程类/服务类语料，2026-09-16）

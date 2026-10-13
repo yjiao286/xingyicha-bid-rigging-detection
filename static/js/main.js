@@ -81,6 +81,42 @@ function formatSize(bytes) {
   return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
 }
 
+// ── Inline SVG icons ──
+// 银河麒麟等环境没有彩色 emoji 字体，红圆/票据/日历一类 emoji 字符会渲染成
+// 空白/豆腐块。界面图标统一走这里的内联 SVG（描边=currentColor 跟随文字色，
+// 尺寸 1em），不要在用户可见的界面字符串里直接写 emoji 字符；新图标往 ICO
+// 里加一项即可。
+const ICO = {
+  warn: '<svg class="ico" viewBox="0 0 24 24"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
+  search: '<svg class="ico" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>',
+  check: '<svg class="ico" viewBox="0 0 24 24"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>',
+  help: '<svg class="ico" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
+  info: '<svg class="ico" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>',
+  clipboard: '<svg class="ico" viewBox="0 0 24 24"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/></svg>',
+  file: '<svg class="ico" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>',
+  receipt: '<svg class="ico" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>',
+  folder: '<svg class="ico" viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>',
+  calendar: '<svg class="ico" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>',
+  idcard: '<svg class="ico" viewBox="0 0 24 24"><rect x="2" y="5" width="20" height="14" rx="2"/><circle cx="8" cy="12" r="2.5"/><path d="M13 10h6"/><path d="M13 14h4"/></svg>',
+  bank: '<svg class="ico" viewBox="0 0 24 24"><path d="M12 3 3 8h18z"/><line x1="6" y1="10" x2="6" y2="17"/><line x1="10" y1="10" x2="10" y2="17"/><line x1="14" y1="10" x2="14" y2="17"/><line x1="18" y1="10" x2="18" y2="17"/><path d="M4 20h16"/><path d="M3 20h18"/></svg>',
+  phone: '<svg class="ico" viewBox="0 0 24 24"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.79 19.79 0 0 1 2.12 4.18 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.12.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.58 2.81.7A2 2 0 0 1 22 16.92z"/></svg>',
+  user: '<svg class="ico" viewBox="0 0 24 24"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>',
+  users: '<svg class="ico" viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>',
+  mail: '<svg class="ico" viewBox="0 0 24 24"><path d="M4 4h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>',
+  bulb: '<svg class="ico" viewBox="0 0 24 24"><path d="M9 18h6"/><path d="M10 22h4"/><path d="M12 2a7 7 0 0 0-4.12 12.66c.63.52 1.12 1.29 1.12 2.09V17h6v-.25c0-.8.49-1.57 1.12-2.09A7 7 0 0 0 12 2z"/></svg>',
+  eye: '<svg class="ico" viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>',
+  cross: '<svg class="ico" viewBox="0 0 24 24"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>',
+  locate: '<svg class="ico" viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/><line x1="12" y1="2" x2="12" y2="5"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="2" y1="12" x2="5" y2="12"/><line x1="19" y1="12" x2="22" y2="12"/></svg>',
+  pin: '<svg class="ico" viewBox="0 0 24 24"><path d="M21 10c0 7-9 12-9 12s-9-5-9-12a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>',
+  money: '<svg class="ico" viewBox="0 0 24 24"><path d="M6 3l6 7 6-7"/><path d="M12 10v11"/><path d="M8.5 13.5h7"/><path d="M8.5 17.5h7"/></svg>',
+  chart: '<svg class="ico" viewBox="0 0 24 24"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>',
+  notes: '<svg class="ico" viewBox="0 0 24 24"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>',
+  star: '<svg class="ico" viewBox="0 0 24 24"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>',
+};
+function ico(name) { return ICO[name] || ''; }
+// 红/黄/白圆点 emoji 的状态点替代：默认 currentColor；cls 传 'd'/'w'/'g' 用红/黄/绿显式配色
+function dot(cls) { return '<span class="ico-dot' + (cls ? ' ' + cls : '') + '"></span>'; }
+
 // ── Progress bar helpers ──
 
 // Highest bar percentage ever reached — the bar must never shrink.
@@ -272,7 +308,7 @@ function showWarning(event) {
     panel.className = 'warning-panel';
     var head = document.createElement('div');
     head.className = 'warning-panel-head';
-    head.innerHTML = '<span>⚠ 分析提示</span>';
+    head.innerHTML = '<span>' + ico('warn') + ' 分析提示</span>';
     var close = document.createElement('button');
     close.className = 'warning-panel-close';
     close.title = '关闭提示';
@@ -287,11 +323,13 @@ function showWarning(event) {
   }
   var existing = panel.querySelectorAll('.warning-msg');
   for (var i = 0; i < existing.length; i++) {
-    if (existing[i].textContent === event.message) return;
+    if (existing[i].dataset.msg === event.message) return;
   }
   var msg = document.createElement('div');
   msg.className = 'warning-msg';
-  msg.textContent = '⚠ ' + event.message;
+  msg.dataset.msg = event.message;
+  // 图标是内联 SVG，正文仍走 escapeHtml
+  msg.innerHTML = ico('warn') + ' ' + escapeHtml(event.message);
   panel.appendChild(msg);
 }
 
@@ -699,18 +737,18 @@ function renderVerdict() {
   const level = v.conclusion_level || 'warning';
   let cls = 'warning', icon = '';
 
-  if (level === 'high') { cls = 'suspect'; icon = '⚠️ '; }
-  else if (level === 'medium') { cls = 'suspicious'; icon = '🔍 '; }
-  else if (level === 'low') { cls = 'clean'; icon = '✅ '; }
-  else if (level === 'uncertain') { cls = 'uncertain'; icon = '❓ '; }
+  if (level === 'high') { cls = 'suspect'; icon = ico('warn') + ' '; }
+  else if (level === 'medium') { cls = 'suspicious'; icon = ico('search') + ' '; }
+  else if (level === 'low') { cls = 'clean'; icon = ico('check') + ' '; }
+  else if (level === 'uncertain') { cls = 'uncertain'; icon = ico('help') + ' '; }
 
   banner.className = 'verdict-banner ' + cls;
-  banner.textContent = icon + '判定结论: ' + conclusion;
+  banner.innerHTML = icon + '判定结论: ' + escapeHtml(conclusion);
 
   // Show reference docs info
   const refDocs = analysisResult.ref_docs || [];
   if (refDocs.length > 0) {
-    banner.textContent += ' (已扣除' + refDocs.length + '份模板文档)';
+    banner.innerHTML += ' (已扣除' + refDocs.length + '份模板文档)';
   }
 
   // ── Score overview cards ──
@@ -763,7 +801,7 @@ function renderVerdict() {
       </div>
     </div>
     <details class="rules-panel">
-      <summary style="cursor:pointer;font-weight:600;color:var(--text-secondary);">📋 综合判定评分规则</summary>
+      <summary style="cursor:pointer;font-weight:600;color:var(--text-secondary);">${ico('clipboard')} 综合判定评分规则</summary>
       <div style="margin-top:8px;line-height:1.8;">
         <p class="rules-block-title">评分依据：《招标投标法实施条例》第三十四条、第四十条</p>
         <table class="rules-table">
@@ -790,10 +828,10 @@ function renderVerdict() {
         </ul>
         <p class="rules-block-title">综合结论阈值：</p>
         <ul class="rules-list">
-          <li>≥ 50分 -&gt; <span style="color:#dc2626;font-weight:600;">⚠️ 存在围标串标高度嫌疑</span></li>
-          <li>15–49分 -&gt; <span style="color:#d97706;font-weight:600;">🔍 存在可疑情形，建议进一步核查</span></li>
-          <li>&lt; 15分 -&gt; <span style="color:#16a34a;font-weight:600;">✅ 未发现明显围标串标异常</span></li>
-          <li>单份文件或全维度无法判断 -&gt; <span style="color:#9ca3af;font-weight:600;">❓ 数据不足，无法做出完整判定</span></li>
+          <li>≥ 50分 -&gt; <span style="color:#dc2626;font-weight:600;">${ico('warn')} 存在围标串标高度嫌疑</span></li>
+          <li>15–49分 -&gt; <span style="color:#d97706;font-weight:600;">${ico('search')} 存在可疑情形，建议进一步核查</span></li>
+          <li>&lt; 15分 -&gt; <span style="color:#16a34a;font-weight:600;">${ico('check')} 未发现明显围标串标异常</span></li>
+          <li>单份文件或全维度无法判断 -&gt; <span style="color:#9ca3af;font-weight:600;">${ico('help')} 数据不足，无法做出完整判定</span></li>
         </ul>
       </div>
     </details>
@@ -853,11 +891,11 @@ function renderMetadata() {
   // ── 1. 元数据一致项 (prominent, first) ──
   let mhtml = '';
   if (meta.matches.length > 0) {
-    mhtml += '<div class="section-title">🔍 元数据一致项</div>';
+    mhtml += '<div class="section-title">' + ico('search') + ' 元数据一致项</div>';
     mhtml += '<div class="meta-match-grid">';
     meta.matches.forEach(m => {
       const isInfo = m.severity === 'info';
-      const icon = isInfo ? 'ℹ️' : (m.severity === 'high' ? '⚠️' : '📋');
+      const icon = isInfo ? ico('info') : (m.severity === 'high' ? ico('warn') : ico('clipboard'));
       const cls = isInfo ? 'meta-info' : (m.severity === 'high' ? 'meta-critical' : 'meta-normal');
       const badgeCls = isInfo ? 'badge-info' : (m.severity === 'high' ? 'badge-high' : 'badge-medium');
       mhtml += `<div class="meta-match-card ${cls}">
@@ -865,24 +903,24 @@ function renderMetadata() {
         <div class="meta-match-body">
           <div class="meta-match-field">${escapeHtml(m.field)}</div>
           <div class="meta-match-value">${escapeHtml(String(m.value).substring(0, 200))}</div>
-          ${m.pair ? `<div class="meta-match-pair">📄 ${escapeHtml(m.pair)}</div>` : ''}
+          ${m.pair ? `<div class="meta-match-pair">${ico('file')} ${escapeHtml(m.pair)}</div>` : ''}
         </div>
         <span class="meta-match-badge ${badgeCls}">${m.verdict}</span>
       </div>`;
     });
     mhtml += '</div>';
   } else {
-    mhtml += '<div class="meta-empty"><span>✅</span> 未发现元数据一致项</div>';
+    mhtml += '<div class="meta-empty"><span>' + ico('check') + '</span> 未发现元数据一致项</div>';
   }
 
   // Time findings
   meta.findings.forEach(f => {
-    if (f && f.trim() && !f.includes('一致')) mhtml += `<p style="font-size:13px;color:#64748b;padding:4px 0;">📅 ${escapeHtml(f)}</p>`;
+    if (f && f.trim() && !f.includes('一致')) mhtml += `<p style="font-size:13px;color:#64748b;padding:4px 0;">${ico('calendar')} ${escapeHtml(f)}</p>`;
   });
   document.getElementById('metadataMatches').innerHTML = mhtml;
 
   // ── 2. 文件元数据详情 (collapsed by default) ──
-  let fhtml = '<div class="section-title" style="margin-top:20px;cursor:pointer;" onclick="document.getElementById(\'metaDetailBody\').style.display = document.getElementById(\'metaDetailBody\').style.display === \'none\' ? \'block\' : \'none\'">📋 文件元数据详情 ▾</div>';
+  let fhtml = '<div class="section-title" style="margin-top:20px;cursor:pointer;" onclick="document.getElementById(\'metaDetailBody\').style.display = document.getElementById(\'metaDetailBody\').style.display === \'none\' ? \'block\' : \'none\'">' + ico('clipboard') + ' 文件元数据详情 ▾</div>';
   fhtml += '<div id="metaDetailBody" style="display:none;">';
   meta.files.forEach(f => {
     const shortName = f.name.length > 40 ? f.name.substring(0, 40) + '...' : f.name;
@@ -906,7 +944,7 @@ function renderMetadata() {
 
   const refDocs = analysisResult.ref_docs || [];
   if (refDocs.length > 0) {
-    fhtml += `<p style="margin-top:8px;font-size:13px;color:#64748b;">📂 模板参考: ${refDocs.map(r => escapeHtml(r)).join(', ')}</p>`;
+    fhtml += `<p style="margin-top:8px;font-size:13px;color:#64748b;">${ico('folder')} 模板参考: ${refDocs.map(r => escapeHtml(r)).join(', ')}</p>`;
   }
   fhtml += '</div>';
   document.getElementById('metadataTables').innerHTML = fhtml;
@@ -1005,17 +1043,17 @@ function _personnelSharedRows(p) {
       }
     });
   }
-  collect('id', '身份证号', '🪪', function(f) {
+  collect('id', '身份证号', ico('idcard'), function(f) {
     return (f.id_numbers && f.id_numbers.length) ? f.id_numbers : (f.id_number ? [f.id_number] : []);
   });
-  collect('bank', '银行账号', '🏦', function(f) { return f.bank_accounts || []; });
-  collect('phone', '联系电话', '📞', function(f) {
+  collect('bank', '银行账号', ico('bank'), function(f) { return f.bank_accounts || []; });
+  collect('phone', '联系电话', ico('phone'), function(f) {
     return (f.phones && f.phones.length) ? f.phones : (f.phone ? [f.phone] : []);
   });
-  collect('name', '同名人员', '👤', function(f) {
+  collect('name', '同名人员', ico('user'), function(f) {
     return (f.all_persons || []).map(function(x) { return x.name; });
   });
-  collect('email', '邮箱', '✉️', function(f) { return f.emails || []; });
+  collect('email', '邮箱', ico('mail'), function(f) { return f.emails || []; });
   var typeOrder = { id: 0, bank: 1, phone: 2, name: 3, email: 4 };
   rows.sort(function(a, b) {
     return (typeOrder[a.type] - typeOrder[b.type]) || (b.count - a.count);
@@ -1081,7 +1119,7 @@ function renderPersonnel() {
   if (!shared.length) {
     // No shared pools — but the cross-match rules may still hit (同角色人员
     // 重叠、授权/修改人交叉…): must NOT claim "无交叉" and contradict them.
-    shtml += '<div class="info-note"><span class="info-note-icon">💡</span><div>' +
+    shtml += '<div class="info-note"><span class="info-note-icon">' + ico('bulb') + '</span><div>' +
       (matches.length
         ? '未发现跨标书<b>完全相同</b>的共享人员/联系方式。下方异常为规则比对命中（同角色人员重叠、授权/修改人交叉等），并非共享值重复'
         : '未发现跨标书人员/联系方式交叉') + '</div></div>';
@@ -1136,13 +1174,13 @@ function renderPersonnel() {
               (shared ? ' title="跨' + freq[v] + '份标书共享 · 点击显示完整号码"' : ' title="点击显示完整号码"') + '>' +
               '<span class="m-short">' + escapeHtml(row.display(v)) + '</span>' +
               '<span class="m-full">' + escapeHtml(String(v)) + '</span>' +
-              '<span class="m-btn">👁</span></span>';
-            if (shared) rowsHtml += ' <span class="same-flag">⚠</span>';
+              '<span class="m-btn">' + ico('eye') + '</span></span>';
+            if (shared) rowsHtml += ' <span class="same-flag">' + ico('warn') + '</span>';
           } else {
             rowsHtml += '<span class="val' + (shared ? ' val-shared' : '') + '"' +
               (shared ? ' title="跨' + freq[v] + '份标书共享"' : '') + '>' +
               escapeHtml(String(v)) +
-              (shared ? ' <span class="same-flag">⚠</span>' : '') + '</span>';
+              (shared ? ' <span class="same-flag">' + ico('warn') + '</span>' : '') + '</span>';
           }
           if (vi < shown.length - 1) rowsHtml += '、';
         });
@@ -1154,7 +1192,7 @@ function renderPersonnel() {
       rowsHtml += '</tr>';
     });
     if (rowsHtml) {
-      chtml += '<div class="section-title">🧾 各标书人员信息对比</div>';
+      chtml += '<div class="section-title">' + ico('receipt') + ' 各标书人员信息对比</div>';
       chtml += '<div style="overflow-x:auto;"><table class="data-table"><thead><tr><th>属性</th>';
       files.forEach(function(f) {
         chtml += '<th title="' + escapeHtml(f.name) + '">' + escapeHtml(shortenName(f.name, 16)) + '</th>';
@@ -1196,7 +1234,7 @@ function renderPersonnel() {
     }
     teamHtml += '</div>';
   });
-  if (teamHtml) chtml += '<div class="section-title" style="margin-top:18px;">👥 项目团队</div>' + teamHtml;
+  if (teamHtml) chtml += '<div class="section-title" style="margin-top:18px;">' + ico('users') + ' 项目团队</div>' + teamHtml;
 
   document.getElementById('personnelTables').innerHTML =
     chtml || '<p class="empty-note">未从标书中提取到人员信息（法定代表人、授权代表、项目成员等）</p>';
@@ -1204,10 +1242,10 @@ function renderPersonnel() {
   // ── Cross matrix: shared values × files ──
   var mhtml2 = '';
   if (shared.length && files.length >= 2) {
-    mhtml2 += '<div class="section-title">🔀 人员交叉矩阵</div>';
+    mhtml2 += '<div class="section-title">' + ico('cross') + ' 人员交叉矩阵</div>';
     var typeDefs = [
-      ['all', '全部'], ['id', '🪪 身份证'], ['bank', '🏦 账号'],
-      ['phone', '📞 电话'], ['name', '👤 姓名'], ['email', '✉️ 邮箱'],
+      ['all', '全部'], ['id', ico('idcard') + ' 身份证'], ['bank', ico('bank') + ' 账号'],
+      ['phone', ico('phone') + ' 电话'], ['name', ico('user') + ' 姓名'], ['email', ico('mail') + ' 邮箱'],
     ];
     var typeFilter = '<div class="kpi-strip" style="margin-bottom:10px;">' +
       typeDefs.map(function(t) {
@@ -1247,10 +1285,10 @@ function renderPersonnel() {
     }
   } else if (files.length >= 2) {
     if (matches.length) {
-      mhtml2 = '<div class="info-note"><span class="info-note-icon">💡</span><div>' +
+      mhtml2 = '<div class="info-note"><span class="info-note-icon">' + ico('bulb') + '</span><div>' +
         '无共享值可展示 — 下方异常为规则比对命中（同角色人员重叠、授权/修改人交叉等）</div></div>';
     } else {
-      mhtml2 = '<div class="info-note"><span class="info-note-icon">💡</span><div>' +
+      mhtml2 = '<div class="info-note"><span class="info-note-icon">' + ico('bulb') + '</span><div>' +
         '未发现跨标书共享的人员/联系方式（无矩阵数据）</div></div>';
     }
   }
@@ -1259,7 +1297,7 @@ function renderPersonnel() {
   // ── Cross-match findings grouped by severity ──
   var mhtml = '';
   if (matches.length > 0) {
-    mhtml += '<div class="section-title" style="margin-top:18px;">🔎 交叉异常' +
+    mhtml += '<div class="section-title" style="margin-top:18px;">' + ico('search') + ' 交叉异常' +
       (_currentSevFilter !== 'all' ? '（已筛选: ' + _sevInfo(_currentSevFilter).label + '）' : '') +
       '</div>';
     var groups = {};
@@ -1327,21 +1365,21 @@ function renderSimilarity() {
     <div class="smart-toggle-row">
       <div class="summary-stat" style="margin:0;">
         ${chip('all', totalMatches, '', '总匹配段落数')}
-        ${chip('substantial', totalSubstantial, 'danger', '🔴 可能高风险异常')}
-        ${chip('suspicious', totalSuspicious, 'warn', '🟡 疑似模板')}
-        ${chip('template', totalTemplate, 'success', '⚪ 已过滤模板')}
+        ${chip('substantial', totalSubstantial, 'danger', dot('d') + ' 可能高风险异常')}
+        ${chip('suspicious', totalSuspicious, 'warn', dot('w') + ' 疑似模板')}
+        ${chip('template', totalTemplate, 'success', dot('g') + ' 已过滤模板')}
       </div>
       <button class="smart-toggle-btn" onclick="toggleAllPairs()" id="btnSmartToggle">▸ 展开全部</button>
     </div>
     <ul class="finding-list">${s.findings.map(f => `<li>${escapeHtml(f)}</li>`).join('')}</ul>
         <details class="rules-panel" style="margin-top:10px;">
-      <summary style="cursor:pointer;font-weight:600;color:var(--text-secondary);">📋 风险分级评分规则</summary>
+      <summary style="cursor:pointer;font-weight:600;color:var(--text-secondary);">${ico('clipboard')} 风险分级评分规则</summary>
       <div style="margin-top:8px;line-height:1.8;">
         <p class="rules-block-title">过滤链（依次执行）：</p>
         <ol class="rules-list">
-          <li>参照文件匹配 - 用户上传的招标文件中出现过的段落 -&gt; <span style="color:#16a34a;">⚪ 已过滤</span></li>
-          <li>规则库匹配 - 签字/盖章/日期、公告措辞、法律条款、格式声明、编号等 -&gt; <span style="color:#16a34a;">⚪ 已过滤</span></li>
-          <li>全局共现检测 - 同一段落在 ≥ max(3, 50%文件数) 份标书中出现 -&gt; <span style="color:#16a34a;">⚪ 已过滤</span></li>
+          <li>参照文件匹配 - 用户上传的招标文件中出现过的段落 -&gt; <span style="color:#16a34a;">${dot()} 已过滤</span></li>
+          <li>规则库匹配 - 签字/盖章/日期、公告措辞、法律条款、格式声明、编号等 -&gt; <span style="color:#16a34a;">${dot()} 已过滤</span></li>
+          <li>全局共现检测 - 同一段落在 ≥ max(3, 50%文件数) 份标书中出现 -&gt; <span style="color:#16a34a;">${dot()} 已过滤</span></li>
         </ol>
         <p class="rules-block-title">实质性评分（4维度加权，满分1.0）：</p>
         <table class="rules-table">
@@ -1355,9 +1393,9 @@ function renderSimilarity() {
         </table>
         <p class="rules-block-title">评分阈值：</p>
         <ul class="rules-list">
-          <li>≥ 0.6 -&gt; <span style="color:#dc2626;font-weight:600;">🔴 可能高风险异常</span> - 参与围串标结论判定</li>
-          <li>0.3–0.6 -&gt; <span style="color:#d97706;font-weight:600;">🟡 疑似模板</span> - 展示但降级，不参与判定</li>
-          <li>&lt; 0.3 -&gt; <span style="color:#16a34a;font-weight:600;">⚪ 已过滤模板</span> - 自动扣除</li>
+          <li>≥ 0.6 -&gt; <span style="color:#dc2626;font-weight:600;">${dot()} 可能高风险异常</span> - 参与围串标结论判定</li>
+          <li>0.3–0.6 -&gt; <span style="color:#d97706;font-weight:600;">${dot()} 疑似模板</span> - 展示但降级，不参与判定</li>
+          <li>&lt; 0.3 -&gt; <span style="color:#16a34a;font-weight:600;">${dot()} 已过滤模板</span> - 自动扣除</li>
         </ul>
       </div>
     </details>
@@ -1470,13 +1508,14 @@ function renderSimilarity() {
               ${_matchLocBadges(m, pr.file1, pr.file2)}
               ${(m.reasons||[]).map(r => `<span class="text-match-reason">${escapeHtml(r)}</span>`).join('')}
               ${m.score !== undefined ? `<span class="text-match-score" style="font-size:11px;color:#888;">[评分:${m.score}]</span>` : ''}
-              <button class="match-locate-btn" onclick="openMatchModal(${refIdx})">📍 定位</button>
+              <button class="match-locate-btn" onclick="openMatchModal(${refIdx})">${ico('locate')} 定位</button>
             </div>
             <div class="text-match-content">${escapeHtml(m.text.substring(0, 200))}${m.text.length > 200 ? '...' : ''}</div>
           </div>`;
         });
         if (hidden.length > 0) {
-          const labelId = label.replace(/[^a-z0-9一-鿿]/g,'');
+          // label 现在含内联 SVG 图标，生成 DOM id 前先剥掉标签
+          const labelId = label.replace(/<[^>]+>/g, '').replace(/[^a-z0-9一-鿿]/g, '');
           h += `<div id="${pairId}-more-${labelId}" style="display:none;">`;
           hidden.forEach(m => {
             const refIdx = _allMatchRefs.length;
@@ -1488,7 +1527,7 @@ function renderSimilarity() {
                 <span class="text-match-length">${m.length}字</span>
                 ${_matchLocBadges(m, pr.file1, pr.file2)}
                 ${m.score !== undefined ? `<span class="text-match-score" style="font-size:11px;color:#888;">[评分:${m.score}]</span>` : ''}
-                <button class="match-locate-btn" onclick="openMatchModal(${refIdx})">📍 定位</button>
+                <button class="match-locate-btn" onclick="openMatchModal(${refIdx})">${ico('locate')} 定位</button>
               </div>
               <div class="text-match-content">${escapeHtml(m.text.substring(0, 200))}${m.text.length > 200 ? '...' : ''}</div>
             </div>`;
@@ -1510,15 +1549,15 @@ function renderSimilarity() {
     };
 
     if (showSubstantial) {
-      dhtml += renderPaginated(substantialMatches, '🔴 可能高风险异常段落（高风险）', '#dc2626', '', false);
+      dhtml += renderPaginated(substantialMatches, dot() + ' 可能高风险异常段落（高风险）', '#dc2626', '', false);
     }
     if (showSuspicious) {
-      dhtml += renderPaginated(suspiciousMatches, '🟡 疑似模板段落（已降级）', '#d97706', 'background:#fffbeb;color:#92400e;', false);
+      dhtml += renderPaginated(suspiciousMatches, dot() + ' 疑似模板段落（已降级）', '#d97706', 'background:#fffbeb;color:#92400e;', false);
     }
     if (showTemplate) {
       // Wrap template in collapsible <details> when filter is 'all', normal otherwise
       const wrapTpl = filter === 'all';
-      dhtml += renderPaginated(templateMatches, '⚪ 已过滤模板内容', '#16a34a', 'background:#f0fdf4;color:#16a34a;', wrapTpl);
+      dhtml += renderPaginated(templateMatches, dot() + ' 已过滤模板内容', '#16a34a', 'background:#f0fdf4;color:#16a34a;', wrapTpl);
     }
     if (filter === 'substantial' && !hasSubstantial) dhtml += '<p style="color:#888;padding:8px 0;">无可能高风险异常段落</p>';
     if (filter === 'suspicious' && !hasSuspicious) dhtml += '<p style="color:#888;padding:8px 0;">无疑似模板段落</p>';
@@ -1604,7 +1643,7 @@ function renderPricing() {
       // group identical values ( collusion signal → danger color )
       var groups = {};
       keyVals.forEach(function(f) { var v = f[priceKey]; groups[v] = (groups[v] || 0) + 1; });
-      tableHtml += '<div class="section-title">💰 报价直观对比</div>';
+      tableHtml += '<div class="section-title">' + ico('money') + ' 报价直观对比</div>';
       tableHtml += '<div class="price-bars">';
       pricedFiles.forEach(function(f) {
         var v = f[priceKey];
@@ -1629,17 +1668,17 @@ function renderPricing() {
           (identical ? ' same' : (maxV > minV && v === minV ? ' low' : '')) +
           '" style="width:' + pct + '%"></span></span>';
         tableHtml += '<span class="price-bar-val">' + _fmtMoney(v) +
-          (identical ? ' <i class="same-flag">⚠ 一致</i>' : diffPct) + '</span>';
+          (identical ? ' <i class="same-flag">' + ico('warn') + ' 一致</i>' : diffPct) + '</span>';
         tableHtml += '</div>';
       });
       tableHtml += '</div>';
       if (Object.keys(groups).length < keyVals.length) {
-        tableHtml += '<p class="bar-note">⚠ 存在完全相同的报价数值 —— 报价异常一致是围串标的典型特征</p>';
+        tableHtml += '<p class="bar-note">' + ico('warn') + ' 存在完全相同的报价数值 —— 报价异常一致是围串标的典型特征</p>';
       }
     }
 
     // ── Detail table ──
-    tableHtml += '<div class="section-title" style="margin-top:16px;">📋 总价明细</div>';
+    tableHtml += '<div class="section-title" style="margin-top:16px;">' + ico('clipboard') + ' 总价明细</div>';
     tableHtml += '<div style="overflow-x:auto;"><table class="data-table"><thead><tr><th>报价项</th>';
     files.forEach(f => {
       tableHtml += '<th title="' + escapeHtml(f.name || '') + '">' + escapeHtml(shortenName(f.name, 16)) + '</th>';
@@ -1672,11 +1711,11 @@ function renderPricing() {
           } else if (typeof v === 'number') {
             var shared = freq[v] >= 2;
             tableHtml += '<td class="num' + (shared ? ' cell-same' : '') + '">' + _fmtMoney(v) +
-              (shared ? ' <span class="same-flag">⚠</span>' : '') + _wanNote(v) + '</td>';
+              (shared ? ' <span class="same-flag">' + ico('warn') + '</span>' : '') + _wanNote(v) + '</td>';
           } else {
             var strShared = freq[v] >= 2;
             tableHtml += '<td' + (strShared ? ' class="cell-same"' : '') + '>' + escapeHtml(String(v)) +
-              (strShared ? ' <span class="same-flag">⚠</span>' : '') + '</td>';
+              (strShared ? ' <span class="same-flag">' + ico('warn') + '</span>' : '') + '</td>';
           }
         });
         tableHtml += '</tr>';
@@ -1705,11 +1744,11 @@ function renderPricing() {
         var yuan = function(v) { return typeof v === 'number' ? ' 元' : ''; };
         if (sameAll === true && vals.length >= 2) {
           var fullCover = vals.length === fileCount;
-          tableHtml += '<p class="price-compare-line same">📌 <strong>' + escapeHtml(label) + '</strong>: ' +
+          tableHtml += '<p class="price-compare-line same">' + ico('pin') + ' <strong>' + escapeHtml(label) + '</strong>: ' +
             (fullCover ? '全部一致' : vals.length + '/' + fileCount + ' 份一致') +
             ' (' + fmtV(vals[0]) + yuan(vals[0]) + ')</p>';
         } else if (sameAll === false && vals.length >= 2) {
-          tableHtml += '<p class="price-compare-line diff">⚠️ <strong>' + escapeHtml(label) + '</strong>: 存在差异 — ' +
+          tableHtml += '<p class="price-compare-line diff">' + ico('warn') + ' <strong>' + escapeHtml(label) + '</strong>: 存在差异 — ' +
             vals.map(function(v) { return fmtV(v) + yuan(v); }).join(' / ') + '</p>';
         }
       });
@@ -1724,7 +1763,7 @@ function renderPricing() {
       tableHtml += '<div style="margin-top:10px;font-size:13px;">';
       warnFiles.forEach(function(f) {
         f.warnings.forEach(function(w) {
-          tableHtml += '<p class="price-compare-line warn-line">⚠️ <strong>' + escapeHtml(shortenName(f.name, 16)) + '</strong>：' + escapeHtml(w) + '</p>';
+          tableHtml += '<p class="price-compare-line warn-line">' + ico('warn') + ' <strong>' + escapeHtml(shortenName(f.name, 16)) + '</strong>：' + escapeHtml(w) + '</p>';
         });
       });
       tableHtml += '</div>';
@@ -1737,7 +1776,7 @@ function renderPricing() {
   // ── Sub-item Comparison ──
   var subHtml = '';
   if (p.subItemCompare && p.subItemCompare.length > 0) {
-    subHtml += '<div class="section-title" style="margin-top:20px;">📊 分项明细比对</div>';
+    subHtml += '<div class="section-title" style="margin-top:20px;">' + ico('chart') + ' 分项明细比对</div>';
     p.subItemCompare.forEach(function(c, ci) {
       // strong findings → badge on the card header
       var strongBadges = [];
@@ -1790,7 +1829,7 @@ function renderPricing() {
           subHtml += '<td>' + (it.count != null ? it.count : '—') + '</td>';
           subHtml += '<td class="num">' + (it.totalPrice != null ? _fmtMoney(it.totalPrice) : '—') + '</td>';
           subHtml += '<td class="num' + (itShared ? ' cell-same' : '') + '">' + (itTotal != null ? _fmtMoney(itTotal) : '—') +
-            (itShared ? ' <span class="same-flag">⚠</span>' : '') + '</td>';
+            (itShared ? ' <span class="same-flag">' + ico('warn') + '</span>' : '') + '</td>';
           subHtml += '<td>' + (it.tax != null ? escapeHtml(String(it.tax)) : '—') + '</td>';
           subHtml += '</tr>';
         });
@@ -1810,7 +1849,7 @@ function renderPricing() {
   // ── Findings ──
   var fhtml = '';
   if (p.findings && p.findings.length > 0) {
-    fhtml += '<div class="section-title" style="margin-top:16px;">📝 分析发现</div>';
+    fhtml += '<div class="section-title" style="margin-top:16px;">' + ico('notes') + ' 分析发现</div>';
     fhtml += '<ul class="finding-list">';
     p.findings.forEach(function(f) { fhtml += '<li>' + escapeHtml(f) + '</li>'; });
     fhtml += '</ul>';
@@ -1944,8 +1983,8 @@ function renderModalMatch() {
 
   const m = ref.match;
   const matchText = m.text || '';
-  document.getElementById('modalTitle').textContent =
-    `第${m.index || '?'}项匹配 (${m.length || 0}字) — ${ref.type === 'abnormal' ? '⚠ 异常一致' : '✅ 模板匹配'}`;
+  document.getElementById('modalTitle').innerHTML =
+    `第${m.index || '?'}项匹配 (${m.length || 0}字) — ${ref.type === 'abnormal' ? ico('warn') + ' 异常一致' : ico('check') + ' 模板匹配'}`;
   document.getElementById('matchCounter').textContent =
     `${_currentMatchIdx + 1} / ${_allMatchRefs.length}`;
   const locSuffix = (side) => {
@@ -2078,12 +2117,12 @@ async function openHistory() {
             <span class="history-time">${escapeHtml(e.time)}</span>
             <span class="history-verdict ${verdictCls}">${escapeHtml(e.verdict)}</span>
           </div>
-          <div class="history-files">📄 ${escapeHtml(filesStr)}</div>
+          <div class="history-files">${ico('file')} ${escapeHtml(filesStr)}</div>
           <div class="history-stats">
             <span>${e.total_pairs}组比对</span>
             <span style="color:var(--danger);">${e.abnormal_matches}异常</span>
             <span style="color:var(--success);">${e.template_matches}模板</span>
-            ${e.ref_count > 0 ? `<span>📂 ${e.ref_count}份参考</span>` : ''}
+            ${e.ref_count > 0 ? `<span>${ico('folder')} ${e.ref_count}份参考</span>` : ''}
           </div>
         </div>
         <button class="history-delete" title="删除" onclick="event.stopPropagation();deleteHistory('${eid}')">×</button>

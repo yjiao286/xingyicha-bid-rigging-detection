@@ -402,7 +402,16 @@ body::after {
   white-space: nowrap; transition: all .2s;
 }
 .progress-step.done { background: #dcfce7; color: #15803d; }
-.progress-step.done::before { content: '✓ '; font-weight: 700; }
+.progress-step.done::before {
+  /* CSS 画的勾：麒麟等环境字体对勾形字符 (U+2713) 覆盖不稳，不依赖字形 */
+  content: '';
+  display: inline-block;
+  width: 4px; height: 8px;
+  margin: 0 5px 1px 1px;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: rotate(45deg);
+}
 .progress-step.active {
   background: #dbeafe; color: var(--accent-dim); font-weight: 600;
   box-shadow: 0 0 0 3px rgba(37,99,235,.12);
@@ -2020,3 +2029,29 @@ body::after {
   border: 1px solid #bfdbfe;
   white-space: nowrap;
 }
+
+/* ── 内联 SVG 图标（麒麟等无彩色 emoji 字体的环境统一用矢量图标） ──
+   红圆/票据/日历一类 emoji 在银河麒麟上没有字形（系统不带 Noto Color Emoji），
+   渲染为空白/豆腐块。界面图标一律走 main.js 的 ico() / index.html 内联
+   <svg class="ico">，描边跟随文字色；禁止在用户可见文案里写字符 emoji。
+   .ico-dot 是红/黄/白圆点一类状态点的替代，默认取 currentColor，
+   d/w/g 为红/黄/绿显式配色（用于文字本身不带色的场合）。 */
+svg.ico {
+  width: 1em; height: 1em;
+  vertical-align: -0.125em;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.ico-dot {
+  display: inline-block;
+  width: 0.52em; height: 0.52em;
+  border-radius: 50%;
+  background: currentColor;
+  vertical-align: 0.075em;
+}
+.ico-dot.d { background: #dc2626; }
+.ico-dot.w { background: #d97706; }
+.ico-dot.g { background: #16a34a; }

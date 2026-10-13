@@ -8395,7 +8395,7 @@ def run_full_analysis(filepaths, ref_filepaths=None, group_map=None, group_texts
                 _ref_failed.append(os.path.basename(rfp))
     if _ref_failed:
         _progress('similarity', '文本相似度分析', 42,
-                  '⚠ 参照文件未能提取正文（' + '、'.join(_ref_failed) +
+                  '参照文件未能提取正文（' + '、'.join(_ref_failed) +
                   '），招标文件模板扣减未生效，结果可能偏高')
 
     # Use display_names (group names) for all comparison outputs
@@ -8420,7 +8420,7 @@ def run_full_analysis(filepaths, ref_filepaths=None, group_map=None, group_texts
         cancel_event=cancel_event, page_maps=group_page_maps)
     if _ref_failed:
         similarity.setdefault('findings', []).append(
-            '⚠ 参照文件未能提取正文（' + '、'.join(_ref_failed) +
+            '参照文件未能提取正文（' + '、'.join(_ref_failed) +
             '）——招标文件模板扣减未生效，相似度结果可能偏高；'
             '请安装 .doc 转换器（LibreOffice/antiword）或改用 .docx/.pdf 参照文件后重新分析')
 
@@ -11374,7 +11374,7 @@ if __name__ == '__main__':
             # 托盘不可用（pystray/Pillow 缺失或初始化失败）：新建控制台窗口，
             # 退回"关窗即停"的可见模式——总好过一个看不见也停不掉的进程。
             if _alloc_console():
-                print('  ⚠ 托盘不可用，已回退控制台窗口模式（关闭本窗口即停止服务）')
+                print('  [注意] 托盘不可用，已回退控制台窗口模式（关闭本窗口即停止服务）')
                 print(f'  访问地址: {url}')
         try:
             # waitress: production-grade pure-Python WSGI server, the only

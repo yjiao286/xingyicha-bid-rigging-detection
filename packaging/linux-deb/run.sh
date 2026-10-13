@@ -29,7 +29,7 @@ export http_proxy="" https_proxy=""
 mkdir -p "$UPLOAD_FOLDER" "$HISTORY_DIR" "$DATA_DIR"
 
 if [ ! -x "$PYTHON" ]; then
-  echo "✗ 找不到内置 Python: $PYTHON"
+  echo "× 找不到内置 Python: $PYTHON"
   echo "  请确认安装完整，且本包对应你的 CPU 架构（x86_64）。"
   read -p "按回车关闭..." _; exit 1
 fi
@@ -57,12 +57,12 @@ open_browser() {
 
 clear 2>/dev/null || true
 echo "╔══════════════════════════════════════════╗"
-echo "║     🚀  星 易 查                          ║"
+echo "║     星 易 查                             ║"
 echo "║     围串标风险识别分析系统                ║"
 echo "╚══════════════════════════════════════════╝"
-echo "  🔗 地址: $URL"
-echo "  📝 日志: $LOG_FILE"
-echo "  ⚠️  关闭此窗口将停止服务"
+echo "  地址: $URL"
+echo "  日志: $LOG_FILE"
+echo "  [注意] 关闭此窗口将停止服务"
 echo ""
 
 # 端口已被占用 → 多半是已有实例在跑，直接复用打开浏览器
@@ -100,7 +100,7 @@ READY=0
 for i in $(seq 1 40); do
   if ! kill -0 "$SERVER_PID" 2>/dev/null; then
     echo ""
-    echo "✗ 服务进程已退出（可能是端口冲突或依赖缺失）。"
+    echo "× 服务进程已退出（可能是端口冲突或依赖缺失）。"
     echo "  最近日志（$LOG_FILE）："
     echo "  ----------------------------------------"
     tail -n 25 "$LOG_FILE" 2>/dev/null | sed 's/^/  /'
@@ -120,12 +120,12 @@ done
 echo "自检：本地直连 $URL ..."
 PROBE=$(curl -s --noproxy '*' -m 5 -o /dev/null -w "%{http_code}" "$URL" 2>/dev/null || echo "000")
 if [ "$PROBE" = "200" ]; then
-  echo "✅ 服务就绪（HTTP 200），正在打开浏览器..."
+  echo "[OK] 服务就绪（HTTP 200），正在打开浏览器..."
 elif [ "$PROBE" = "000" ]; then
-  echo "⚠️  本地直连失败（$PROBE）。服务可能仍在初始化，或端口被拦截。"
+  echo "[注意] 本地直连失败（$PROBE）。服务可能仍在初始化，或端口被拦截。"
   echo "    请稍候手动访问：$URL"
 else
-  echo "⚠️  本地直连返回 HTTP $PROBE（非 200）。"
+  echo "[注意] 本地直连返回 HTTP $PROBE（非 200）。"
   echo "    若页面显示 {\"error\":\"服务器内部错误\",\"_meta\":...}，那不是本程序产生，"
   echo "    多为系统/浏览器 HTTP 代理拦截。请在浏览器代理设置里放行 127.0.0.1 / localhost。"
   echo "    最近日志见：$LOG_FILE"

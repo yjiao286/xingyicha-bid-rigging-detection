@@ -9,8 +9,8 @@ cd "$PROJECT_DIR" || exit 1
 
 # 检查是否已在运行
 if lsof -ti:"$PORT" &>/dev/null; then
-    echo "✅ 服务器已在运行中 (端口 $PORT)"
-    echo "🌐 正在打开浏览器..."
+    echo "[OK] 服务器已在运行中 (端口 $PORT)"
+    echo "正在打开浏览器..."
     open "$URL"
     exit 0
 fi
@@ -19,16 +19,16 @@ fi
 clear
 echo "╔══════════════════════════════════════════╗"
 echo "║                                          ║"
-echo "║     🚀  星 易 查                        ║"
+echo "║     星 易 查                             ║"
 echo "║     围串标风险识别分析系统               ║"
 echo "║                                          ║"
 echo "╚══════════════════════════════════════════╝"
 echo ""
-echo "  📡 正在启动服务器..."
-echo "  🌐 端口: $PORT"
-echo "  🔗 地址: $URL"
+echo "  正在启动服务器..."
+echo "  端口: $PORT"
+echo "  地址: $URL"
 echo ""
-echo "  ⚠️  关闭此窗口将停止服务器"
+echo "  [注意] 关闭此窗口将停止服务器"
 echo ""
 
 # 后台启动并等待就绪后打开浏览器
@@ -38,8 +38,8 @@ SERVER_PID=$!
 # 等待服务器就绪
 for i in $(seq 1 30); do
     if curl -s -o /dev/null "$URL" 2>/dev/null; then
-        echo "✅ 服务器启动成功！"
-        echo "🌐 正在打开浏览器..."
+        echo "[OK] 服务器启动成功！"
+        echo "正在打开浏览器..."
         open "$URL"
         break
     fi
