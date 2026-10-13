@@ -2,7 +2,6 @@ import os
 import sys
 import re
 import json
-import base64
 import glob
 import zipfile
 import subprocess
@@ -5301,7 +5300,6 @@ def _validate_price_extraction(text, result, bid_section):
     tp = result.get('totalPrice')
     tpit = result.get('totalPriceInTax')
     tax_str = result.get('taxRate')
-    cost = result.get('cost')
 
     # ── Helper: check if a numeric value appears near price-indicator keywords ──
     def _near_price_context(value, window=120):
@@ -7576,7 +7574,6 @@ def text_similarity_analysis(texts_dict, ref_texts_list=None, on_progress=None,
     # ── Step 0: Build global template index ──
     global_templates = _build_global_template_index(texts_dict)
     global_template_count = 0
-    rule_template_count = 0
 
     results = {
         'total_pairs': 0,
@@ -7787,8 +7784,6 @@ def text_similarity_analysis(texts_dict, ref_texts_list=None, on_progress=None,
 
                 if score >= 0.6:
                     # Real collusion-level content
-                    risk_level = 'substantial'
-                    is_abnormal = True
                     pair_result['substantial_count'] += 1
                     match_entry = {
                         'index': idx + 1, 'length': length,
@@ -7829,7 +7824,6 @@ def text_similarity_analysis(texts_dict, ref_texts_list=None, on_progress=None,
 
                 elif score >= 0.3:
                     # Ambiguous — suspicious but not conclusive
-                    risk_level = 'suspicious'
                     pair_result['suspicious_count'] += 1
                     match_entry = {
                         'index': idx + 1, 'length': length,
@@ -7857,7 +7851,6 @@ def text_similarity_analysis(texts_dict, ref_texts_list=None, on_progress=None,
 
                 else:
                     # Low score — treat as template
-                    risk_level = 'template'
                     pair_result['template_count'] += 1
                     results['template_matches'] += 1
                     match_entry = {
@@ -7946,7 +7939,6 @@ def text_similarity_analysis(texts_dict, ref_texts_list=None, on_progress=None,
     results['global_template_count'] = global_template_count
 
     # ── Generate findings ──
-    total_abnormal = sum(p['abnormal_count'] for p in results['pair_results'])
     total_template = results['template_matches']
     total_substantial = len(results['substantial_abnormal'])
     total_suspicious = len(results['suspicious_template'])
@@ -8117,7 +8109,6 @@ def _build_sub_item_comparison(all_prices, filenames):
 
         prices_incl = [it['totalPriceInTax'] for it in items if it.get('totalPriceInTax')]
         prices_excl = [it['totalPrice'] for it in items if it.get('totalPrice')]
-        files_involved = [it['file'] for it in items]
 
         # 不含税 is the preferred basis (a spread measured on one consistent
         # footing says more), but plenty of bids quote only a 含税 total —
@@ -8806,9 +8797,6 @@ def run_full_analysis(filepaths, ref_filepaths=None, group_map=None, group_texts
 
     _progress('personnel', '人员交叉比对', 86, f'交叉比对法定代表人、授权代表、项目成员等，发现 {len(personnel_matches)} 处异常')
 
-    # ── Text similarity findings (summary before pricing) ──
-    total_abnormal = sum(p['abnormal_count'] for p in similarity['pair_results'])
-
     # ── Compile pricing comparison (structured format) ──
     price_compare = {}
     price_risk_findings = []
@@ -8907,7 +8895,7 @@ def run_full_analysis(filepaths, ref_filepaths=None, group_map=None, group_texts
             elif not has_total and has_details:
                 price_no_data_findings.append(f'{gn}仅提取到成本明细，未提取到总价')
 
-    _progress('pricing', '报价分析', 92, f'比较含税总价、不含税总价、分项单价等')
+    _progress('pricing', '报价分析', 92, '比较含税总价、不含税总价、分项单价等')
 
     # ── Service unit-price comparison (元/人/天 …) ──
     # 餐饮/物业等服务类标书按人头单价计价，总价通道往往全空——单价才是
@@ -10337,7 +10325,6 @@ def analyze_stream():
 
         def extract_all():
             try:
-                total_groups = len(group_map)
                 jobs = [(gi, g, p)
                         for gi, (g, ps) in enumerate(group_map.items())
                         for p in ps]
