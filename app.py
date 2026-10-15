@@ -9971,6 +9971,252 @@ def generate_report_docx(analysis):
     return buf
 
 
+def generate_risk_report_docx(analysis):
+    """Generate a concise risk-summary .docx report for offline review.
+
+    面向线下评审场景：只保留结论、风险证据与处置建议，不含文件元数据
+    明细、人员名单、报价明细表、评分规则与法条附录。核心是「六、文本
+    相似度异常对照」——每条异常段落渲染为左右对照表（表头为文件名+页
+    码/位置定位，内容为两份文件的实际文本），审核人无需回系统即可逐
+    条核验。
+
+    All field access is defensive (.get with defaults) so the report can be
+    regenerated both from live results and from history records lightened by
+    _prepare_history_data（对照文本用 ctx1/ctx2——两条链路各保留 400
+    字符，形态一致；不用 text 字段，它在实时/历史链路上限不同）。
+    """
+    doc = Document()
+    _setup_report_styles(doc)
+
+    meta_section = analysis.get('metadata') or {}
+    personnel_section = analysis.get('personnel') or {}
+    similarity_section = analysis.get('text_similarity') or {}
+    pricing_section = analysis.get('pricing') or {}
+    verdict_section = analysis.get('verdict') or {}
+
+    meta_files = meta_section.get('files') or []
+    personnel_files = personnel_section.get('files') or []
+    pricing_files = pricing_section.get('files') or []
+    meta_matches = meta_section.get('matches') or []
+    cross_matches = personnel_section.get('cross_matches') or []
+    pair_results = similarity_section.get('pair_results') or []
+    clauses = verdict_section.get('clauses') or []
+    ref_docs = analysis.get('ref_docs') or []
+
+    score = verdict_section.get('score') or 0
+    max_score = verdict_section.get('max_score') or 100
+    conclusion_level = verdict_section.get('conclusion_level') or 'uncertain'
+    conclusion = verdict_section.get('conclusion') or '-'
+    level_text = _LEVEL_TEXT.get(conclusion_level, conclusion_level)
+    level_color = _LEVEL_COLORS.get(conclusion_level)
+
+    # ── Title block ──
+    title = doc.add_heading('围串标风险摘要报告', level=0)
+    title.alignment = 1  # center
+    num_files = len(meta_files) or len(personnel_files) or len(pricing_files)
+    doc.add_paragraph(f'生成时间: {datetime.now().strftime("%Y年%m月%d日 %H:%M:%S")}')
+    doc.add_paragraph('分析依据: 《中华人民共和国招标投标法实施条例》第三十四条、第四十条')
+    doc.add_paragraph(f'分析文件: {num_files} 份，交叉比对 {len(pair_results)} 组')
+    if ref_docs:
+        doc.add_paragraph(
+            f'模板扣除: 已上传 {len(ref_docs)} 份招标文件/模板，用于排除正常一致内容')
+    doc.add_paragraph('─' * 60)
+
+    # ── 1. Conclusion ──
+    doc.add_heading('一、综合结论', level=1)
+    _conclusion_para(doc, f'综合风险评分: {score} / {max_score} 分（风险等级: {level_text}）',
+                     color=level_color, size=14)
+    _conclusion_para(doc, f'判定结论: {conclusion}', color=level_color, size=14, underline=True)
+    satisfied_n = sum(1 for c in clauses if c.get('satisfied') is True)
+    uncertain_n = sum(1 for c in clauses if c.get('satisfied') is None)
+    not_n = sum(1 for c in clauses if c.get('satisfied') is False)
+    doc.add_paragraph(
+        f'条款命中: 满足 {satisfied_n} 项 · 无法判断 {uncertain_n} 项 · 不满足 {not_n} 项')
+    if clauses:
+        clause_rows = []
+        for c in clauses:
+            sat = c.get('satisfied')
+            sat_str = '满足' if sat is True else ('不满足' if sat is False else '无法判断')
+            clause_rows.append([
+                c.get('clause', '-'),
+                c.get('description', ''),
+                sat_str,
+                c.get('evidence_level', '无'),
+                c.get('_score', '-'),
+            ])
+        clause_table = _report_table(
+            doc, ['条款', '条款内容', '判定', '证据强度', '得分'], clause_rows)
+        for trow in clause_table.rows[1:]:
+            _emphasize_cell(trow.cells[2], color=_SAT_TXT_COLORS.get(trow.cells[2].text.strip()))
+            if trow.cells[3].text.strip() == '强':
+                _emphasize_cell(trow.cells[3], color=_RED)
+
+    # ── 2. Key risks summary ──
+    severe_matches = [m for m in cross_matches if m.get('severity') in ('critical', 'high')]
+    total_substantial = sum(p.get('substantial_count') or 0 for p in pair_results)
+    total_suspicious = sum(p.get('suspicious_count') or 0 for p in pair_results)
+    key_risks = []
+    for m in severe_matches:
+        key_risks.append(('人员', m.get('detail', '')))
+    for m in meta_matches:
+        if m.get('severity') == 'high':
+            pair = f'（{m.get("pair")}）' if m.get('pair') else ''
+            key_risks.append(('元数据', f'{m.get("field")}: {m.get("value")}{pair}'))
+    for e in (similarity_section.get('substantial_abnormal') or [])[:5]:
+        loc1 = _match_page_label(e, 1)
+        loc2 = _match_page_label(e, 2)
+        key_risks.append(('文本', f'{e.get("pair")} 异常一致（文件1 {loc1} / 文件2 {loc2}）: '
+                                  f'{str(e.get("text", ""))[:120]}'))
+    for f_text in (pricing_section.get('findings') or []):
+        s = str(f_text)
+        if any(k in s for k in ('一致', '等差', '高度接近')):
+            key_risks.append(('报价', s))
+    doc.add_heading('二、主要风险点摘要', level=1)
+    if key_risks:
+        for dim, text in key_risks[:12]:
+            _conclusion_para(doc, f'[{dim}] {text}', color=_RED, style='List Bullet')
+    else:
+        _conclusion_para(doc, '未发现高风险信号。', color=_GREEN)
+
+    # ── 3. Personnel cross matches ──
+    doc.add_heading('三、人员交叉发现', level=1)
+    if cross_matches:
+        for m in sorted(cross_matches, key=lambda m: _SEVERITY_ORDER.get(m.get('severity'), 3)):
+            sev = _SEVERITY_TEXT.get(m.get('severity'), '信息')
+            p = doc.add_paragraph(style='List Bullet')
+            p.add_run(f'【{sev}】')
+            p.add_run(f'{m.get("type", "")} — {m.get("detail", "")}')
+            _severity_runs(p, m.get('severity'))
+    else:
+        _conclusion_para(doc, '未发现人员交叉异常。', color=_GREEN)
+
+    # ── 4. Metadata consistency ──
+    doc.add_heading('四、元数据一致项', level=1)
+    if meta_matches:
+        for m in sorted(meta_matches, key=lambda m: _SEVERITY_ORDER.get(m.get('severity'), 3)):
+            sev = _SEVERITY_TEXT.get(m.get('severity'), '信息')
+            pair = f'（{m.get("pair")}）' if m.get('pair') else ''
+            p = doc.add_paragraph(style='List Bullet')
+            p.add_run(f'【{sev}】')
+            p.add_run(f'{m.get("field")}: {m.get("value")}{pair} — {m.get("verdict", "")}')
+            _severity_runs(p, m.get('severity'))
+    else:
+        _conclusion_para(doc, '未发现元数据一致项。', color=_GREEN)
+
+    # ── 5. Pricing anomalies ──
+    doc.add_heading('五、报价异常', level=1)
+    price_risks = [str(f_text) for f_text in (pricing_section.get('findings') or [])
+                   if any(k in str(f_text) for k in ('一致', '等差', '高度接近'))]
+    if price_risks:
+        for s in price_risks:
+            _finding_para(doc, s)
+    else:
+        _conclusion_para(doc, '未发现报价异常信号。', color=_GREEN)
+
+    # ── 6. Similarity side-by-side evidence ──
+    doc.add_heading('六、文本相似度异常对照', level=1)
+    doc.add_paragraph(
+        f'高风险异常段落 {total_substantial} 处，疑似模板段落 {total_suspicious} 处。'
+        '以下逐条列出双侧对照：每个表格左右两列分别为两份文件的实际文本，'
+        '表头标注文件名与位置，可按位置直接回到原件核验。')
+    pairs_with_abnormal = []
+    for pr in pair_results:
+        abnormal = [m for m in (pr.get('matches') or []) if m.get('abnormal')]
+        if abnormal:
+            pairs_with_abnormal.append((pr, abnormal))
+    if pairs_with_abnormal:
+        # 异常最多的组排前面，审核人先看到最严重的文件组合
+        pairs_with_abnormal.sort(key=lambda item: len(item[1]), reverse=True)
+        for pr, abnormal_matches in pairs_with_abnormal:
+            f1n = str(pr.get('file1', '文件1'))
+            f2n = str(pr.get('file2', '文件2'))
+            doc.add_heading(f'{f1n} vs {f2n}', level=2)
+            doc.add_paragraph(
+                f'异常一致段落数: {pr.get("abnormal_count", len(abnormal_matches))}'
+                f'（高风险 {pr.get("substantial_count", 0)}，疑似模板 {pr.get("suspicious_count", 0)}），'
+                f'已过滤模板段落 {pr.get("template_count", 0)}')
+            # 相似度高的排前面；score 缺失时稳定保持原顺序
+            ordered = sorted(
+                abnormal_matches,
+                key=lambda m: m.get('score') if isinstance(m.get('score'), (int, float)) else 0,
+                reverse=True)
+            shown = ordered[:30]
+            hidden = len(ordered) - len(shown)
+            for m in shown:
+                m_score = m.get('score')
+                score_str = f' {m_score:.0%}' if isinstance(m_score, (int, float)) else ''
+                kind = ('高度近似' if m.get('near_duplicate') else '高风险') + score_str
+                reasons = '；'.join(str(r) for r in (m.get('reasons') or []))
+                p = doc.add_paragraph()
+                r1 = p.add_run(f'#{m.get("index")} {kind}')
+                r1.font.bold = True
+                r1.font.color.rgb = _RED
+                if reasons:
+                    p.add_run(f'　判定依据: {reasons}')
+                # 双侧对照表：表头为文件名+定位（审核人单看一张表即可知道
+                # 两侧各出自哪份文件、在原件何处），内容行为两侧实际文本。
+                # 用 ctx1/ctx2（匹配段±前后文，各 ≤400 字符）——实时与历史
+                # 链路长度一致，报告形态稳定。
+                c1 = str(m.get('ctx1') or m.get('text') or '').replace('\n', ' ').strip() or '-'
+                c2 = str(m.get('ctx2') or m.get('text') or '').replace('\n', ' ').strip() or '-'
+                _report_table(doc, [f'{f1n}（{_match_page_label(m, 1)}）',
+                                    f'{f2n}（{_match_page_label(m, 2)}）'],
+                              [[c1, c2]])
+            if hidden > 0:
+                doc.add_paragraph(f'另有 {hidden} 处异常一致段落未列出，详见详细报告或在系统中查看。')
+            doc.add_paragraph(
+                '说明：位置为 PDF 原始页码；Word/txt 等无分页概念的格式显示为'
+                '文档内相对位置百分比，可据此快速定位原文。')
+    else:
+        _conclusion_para(doc, '未发现文本相似度异常（高风险异常段落 0 处）。', color=_GREEN)
+
+    # ── 7. Conclusion & advice ──
+    doc.add_heading('七、结论与处置建议', level=1)
+    doc.add_heading('最终结论', level=2)
+    _conclusion_para(doc, conclusion, color=level_color, size=14, underline=True)
+    _conclusion_para(doc, f'综合风险评分: {score}/{max_score} 分，风险等级: {level_text}',
+                     color=level_color, size=14)
+    doc.add_heading('处置建议', level=2)
+    doc.add_paragraph('总体建议:', style='List Bullet')
+    for a in _REPORT_ADVICE.get(conclusion_level, _REPORT_ADVICE['uncertain']):
+        doc.add_paragraph(a, style='List Bullet 2')
+    # 专项建议：按本次实际命中的条款与线索生成，未命中的不输出
+    clause_advice = [
+        _REPORT_CLAUSE_ADVICE[c['clause']]
+        for c in clauses
+        if c.get('satisfied') is True and c.get('clause') in _REPORT_CLAUSE_ADVICE
+    ]
+    if any(m.get('type') == '银行账号相同' for m in cross_matches):
+        clause_advice.append(_REPORT_BANK_ADVICE)
+    if clause_advice:
+        doc.add_paragraph('针对本次命中情形的专项建议:', style='List Bullet')
+        for a in clause_advice:
+            doc.add_paragraph(a, style='List Bullet 2')
+
+    # ── 8. Usage notes ──
+    doc.add_heading('八、使用说明', level=1)
+    for note in (
+        '本报告为风险摘要版，聚焦风险结论与证据对照，供线下评审快速复核使用。',
+        '完整维度明细（文件元数据、人员名单、报价明细、评分规则、法条原文）'
+        '见《围串标风险识别分析报告》（详细版），可在系统中下载。',
+        '报告结论由系统自动生成，仅供参考，最终认定请结合原件与评审程序判断。',
+    ):
+        doc.add_paragraph(note, style='List Bullet')
+
+    # Footer disclaimer
+    try:
+        footer_para = doc.sections[0].footer.paragraphs[0]
+        footer_para.text = '本报告由围串标风险识别系统自动生成，仅供参考'
+        footer_para.alignment = 1  # center
+    except Exception:
+        pass
+
+    buf = BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+    return buf
+
+
 # ── Routes ───────────────────────────────────────────────────────
 @app.route('/')
 def index():
@@ -10034,10 +10280,19 @@ def report():
         return jsonify({'error': f'分析数据结构不完整，缺少: {", ".join(missing)}'}), 400
 
     try:
-        buf = generate_report_docx(analysis_data)
+        # mode: 'full'（默认，综合详细报告）/ 'risk'（风险摘要报告——线下
+        # 评审用，含文本相似度双侧对照证据）。缺省与未知值回落 full，
+        # 旧调用方（历史记录/脚本）完全兼容。
+        mode = data.get('mode') or 'full'
+        if mode == 'risk':
+            buf = generate_risk_report_docx(analysis_data)
+            title_prefix = '围串标风险摘要报告'
+        else:
+            buf = generate_report_docx(analysis_data)
+            title_prefix = '围串标风险识别分析报告'
         # 文件名 = 标题 + 项目名 + 判定等级 + 时间戳；项目名做安全过滤，
         # 各段均可缺失（旧历史记录无 project_name / verdict 残缺时退化）
-        parts = ['围串标风险识别分析报告']
+        parts = [title_prefix]
         proj = _sanitize_filename_component(analysis_data.get('project_name') or '')
         if proj:
             parts.append(proj)

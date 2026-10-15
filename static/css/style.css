@@ -921,7 +921,8 @@ details > summary::marker { color: var(--accent); }
 
 /* ── Download ── */
 .download-row {
-  text-align: center; padding: 28px;
+  display: flex; justify-content: center; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 28px;
   border-top: 1px solid var(--border-light);
   background: linear-gradient(180deg, #fafbfd, #f6f8fc);
 }

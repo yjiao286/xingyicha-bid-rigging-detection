@@ -2768,6 +2768,105 @@ def t_report_table_has_page_columns():
     assert len(doc.tables) == 1
 
 
+def _risk_report_fixture():
+    """最小可用 analysis dict：5 顶层 section + 1 个 pair 两条异常段落
+    （1 条逐字相同 + 1 条高度近似），带双侧上下文与页码定位。"""
+    return {
+        'metadata': {'files': [{'name': '甲公司.docx', 'creator': '张三',
+                                'last_modified_by': '张三'}],
+                     'matches': [{'field': '最后保存者', 'value': '张三',
+                                  'severity': 'high',
+                                  'pair': '甲公司.docx vs 乙公司.docx',
+                                  'verdict': '同一人编制'}]},
+        'personnel': {'files': [{'name': '甲公司.docx'}],
+                      'cross_matches': [{'type': '联系电话相同', 'severity': 'high',
+                                         'detail': '甲公司 和 乙公司 联系电话均为 13800000000'}]},
+        'text_similarity': {
+            'total_pairs': 1,
+            'pair_results': [{
+                'file1': '甲公司.docx', 'file2': '乙公司.docx',
+                'total_matches': 2, 'abnormal_count': 2,
+                'substantial_count': 2, 'suspicious_count': 0, 'template_count': 1,
+                'matches': [
+                    {'index': 1, 'length': 60, 'abnormal': True,
+                     'risk_level': 'substantial', 'score': 0.92,
+                     'reasons': ['连续相同行文超过50字'],
+                     'text': '甲侧逐字相同段落内容',
+                     'ctx1': '甲侧前文甲侧逐字相同段落内容甲侧后文',
+                     'ctx2': '乙侧前文甲侧逐字相同段落内容乙侧后文',
+                     'page1': 12, 'page2': 15, 'pct1': None, 'pct2': None},
+                    {'index': 2, 'length': 80, 'abnormal': True, 'near_duplicate': True,
+                     'risk_level': 'substantial', 'score': 0.85,
+                     'reasons': ['高度近似段落（相似度85%，仅少量字词差异）'],
+                     'text': '甲侧近似段落内容',
+                     'ctx1': '甲侧近似段落全文内容',
+                     'ctx2': '乙侧近似段落全文内容',
+                     'page1': None, 'page2': None, 'pct1': 37, 'pct2': 41},
+                ]}],
+            'substantial_abnormal': [
+                {'pair': '甲公司.docx vs 乙公司.docx', 'index': 1,
+                 'text': '甲侧逐字相同段落内容', 'page1': 12, 'page2': 15}],
+        },
+        'pricing': {'files': [{'name': '甲公司.docx'}],
+                    'findings': ['甲公司 和 乙公司 不含税总价一致: 98000元']},
+        'verdict': {'score': 72, 'max_score': 100, 'conclusion_level': 'high',
+                    'conclusion': '高度怀疑存在围标串标行为',
+                    'clauses': [{'clause': '第（四）项-a', 'description': '异常一致',
+                                 'satisfied': True, 'evidence_level': '强',
+                                 '_weight': 25, '_score': 25}]},
+    }
+
+
+def t_risk_report_similarity_side_by_side():
+    # 风险摘要报告的核心承诺：每条异常段落渲染双侧对照（文件1 与文件2
+    # 的实际文本都出现在 docx 里），并带页码/位置定位——线下审核无需回
+    # 系统即可核验。逐字相同段也必须双侧展示（详细报告里逐字相同只展示
+    # 单侧，正是"只见风险不见内容"的来源）。
+    import zipfile
+    buf = m.generate_risk_report_docx(_risk_report_fixture())
+    with zipfile.ZipFile(buf) as z:
+        xml = z.read('word/document.xml').decode('utf-8')
+    assert '围串标风险摘要报告' in xml, '风险摘要报告标题缺失'
+    assert '文本相似度异常对照' in xml, '相似度对照章节缺失'
+    # 逐字相同段（#1）：两侧上下文都要渲染
+    assert '甲侧前文甲侧逐字相同段落内容甲侧后文' in xml, '文件1 侧上下文缺失'
+    assert '乙侧前文甲侧逐字相同段落内容乙侧后文' in xml, '文件2 侧上下文缺失'
+    # 高度近似段（#2）：两侧段落文本都要渲染
+    assert '甲侧近似段落全文内容' in xml and '乙侧近似段落全文内容' in xml, '近似段双侧内容缺失'
+    # 定位表头直接用文件名（不是"文件1/文件2"侧别）：PDF 页码 + 相对
+    # 位置百分比两种形态
+    assert '甲公司.docx（第12页）' in xml and '乙公司.docx（第15页）' in xml, '页码定位表头缺失'
+    assert '甲公司.docx（≈37%处）' in xml, '百分比定位表头缺失'
+    assert '文件1（' not in xml and '文件2（' not in xml, '表头仍在使用文件1/文件2侧别'
+    # 摘要、结论与处置建议照常渲染
+    assert '主要风险点摘要' in xml and '高度怀疑存在围标串标行为' in xml
+    assert '结论与处置建议' in xml and '处置建议' in xml and '总体建议' in xml, '结论与建议章节缺失'
+
+
+def t_report_endpoint_mode_dispatch():
+    # /api/report 的 mode 分发：'risk' 走风险摘要报告（文件名前缀区分），
+    # 缺省与 'full' 走原详细报告——历史记录与旧调用方完全兼容。
+    from urllib.parse import unquote
+    client = m.app.test_client()
+    payload = {'analysis': _risk_report_fixture()}
+    resp = client.post('/api/report', json=payload)
+    assert resp.status_code == 200, resp.status_code
+    cd = unquote(resp.headers.get('Content-Disposition', ''))
+    assert '围串标风险识别分析报告' in cd, cd
+    resp = client.post('/api/report', json=dict(payload, mode='full'))
+    assert resp.status_code == 200, resp.status_code
+    cd = unquote(resp.headers.get('Content-Disposition', ''))
+    assert '围串标风险识别分析报告' in cd, cd
+    resp = client.post('/api/report', json=dict(payload, mode='risk'))
+    assert resp.status_code == 200, resp.status_code
+    cd = unquote(resp.headers.get('Content-Disposition', ''))
+    assert '围串标风险摘要报告' in cd, cd
+    assert '围串标风险识别分析报告' not in cd, cd
+    # 结构不完整的 payload 在两种 mode 下都走同一道 400 校验
+    resp = client.post('/api/report', json={'analysis': {'metadata': {}}, 'mode': 'risk'})
+    assert resp.status_code == 400, resp.status_code
+
+
 def _chmod_x(path):
     """显式覆盖要求可执行位（POSIX）；Windows 无 X_OK，chmod 失败忽略。"""
     try:

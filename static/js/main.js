@@ -27,6 +27,7 @@ const refFileList = document.getElementById('refFileList');
 const btnAnalyze = document.getElementById('btnAnalyze');
 const btnClear = document.getElementById('btnClear');
 const btnDownload = document.getElementById('btnDownload');
+const btnDownloadRisk = document.getElementById('btnDownloadRisk');
 const progressPanel = document.getElementById('progressPanel');
 const progressFill = document.getElementById('progressFill');
 const progressBar = progressFill.parentElement;  // the track (.progress-bar)
@@ -2179,21 +2180,22 @@ async function deleteHistory(id) {
 }
 
 // ── Download Report ──
-btnDownload.addEventListener('click', async () => {
+// mode: 'full' 综合详细报告 / 'risk' 风险摘要报告（线下评审用，含相似度双侧对照）
+async function downloadReport(mode, btn) {
   if (!analysisResult) {
     alert('请先完成分析，再下载报告');
     return;
   }
 
-  const originalText = btnDownload.innerHTML;
-  btnDownload.disabled = true;
-  btnDownload.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg> 生成报告中...';
+  const originalText = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg> 生成报告中...';
 
   try {
     const resp = await fetch('/api/report', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ analysis: analysisResult })
+      body: JSON.stringify({ analysis: analysisResult, mode })
     });
 
     if (!resp.ok) {
@@ -2220,7 +2222,8 @@ btnDownload.addEventListener('click', async () => {
       const d = new Date(), pad = function(n) { return String(n).padStart(2, '0'); };
       const stamp = '' + d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate())
         + '_' + pad(d.getHours()) + pad(d.getMinutes()) + pad(d.getSeconds());
-      fname = ['围串标风险识别分析报告', proj, lv, stamp].filter(Boolean).join('_') + '.docx';
+      const prefix = mode === 'risk' ? '围串标风险摘要报告' : '围串标风险识别分析报告';
+      fname = [prefix, proj, lv, stamp].filter(Boolean).join('_') + '.docx';
     }
     a.download = fname;
     document.body.appendChild(a);
@@ -2231,10 +2234,13 @@ btnDownload.addEventListener('click', async () => {
     console.error('Report download failed:', err);
     alert('报告生成失败: ' + (err.message || '未知错误'));
   } finally {
-    btnDownload.disabled = false;
-    btnDownload.innerHTML = originalText;
+    btn.disabled = false;
+    btn.innerHTML = originalText;
   }
-});
+}
+
+btnDownload.addEventListener('click', () => downloadReport('full', btnDownload));
+btnDownloadRisk.addEventListener('click', () => downloadReport('risk', btnDownloadRisk));
 
 document.getElementById('btnCloseHistory').addEventListener('click', () => {
   document.getElementById('historyModal').style.display = 'none';
