@@ -2806,14 +2806,22 @@ def _risk_report_fixture():
             'substantial_abnormal': [
                 {'pair': '甲公司.docx vs 乙公司.docx', 'index': 1,
                  'text': '甲侧逐字相同段落内容', 'page1': 12, 'page2': 15}],
+            'findings': ['共发现 2 处可能高风险异常文本段落（高风险）',
+                         '甲公司.docx vs 乙公司.docx 存在相同的具体地址值'
+                         '（售后服务/注册/经营地址）: 北京市海淀区某路某号…'],
+            'address_same_count': 1,
         },
         'pricing': {'files': [{'name': '甲公司.docx'}],
                     'findings': ['甲公司 和 乙公司 不含税总价一致: 98000元']},
-        'verdict': {'score': 72, 'max_score': 100, 'conclusion_level': 'high',
+        'verdict': {'score': 40, 'max_score': 100, 'conclusion_level': 'high',
                     'conclusion': '高度怀疑存在围标串标行为',
+                    'address_bonus': 10,
                     'clauses': [{'clause': '第（四）项-a', 'description': '异常一致',
                                  'satisfied': True, 'evidence_level': '强',
-                                 '_weight': 25, '_score': 25}]},
+                                 '_weight': 5, '_score': 5},
+                                {'clause': '第（四）项-b', 'description': '报价规律',
+                                 'satisfied': True, 'evidence_level': '强',
+                                 '_weight': 4, '_score': 4}]},
     }
 
 
@@ -2847,6 +2855,10 @@ def t_risk_report_similarity_side_by_side():
     # 摘要、结论与处置建议照常渲染
     assert '主要风险点摘要' in xml and '高度怀疑存在围标串标行为' in xml
     assert '结论与处置建议' in xml and '处置建议' in xml and '总体建议' in xml, '结论与建议章节缺失'
+    # 地址相同专项加分：评分构成行 + 摘要单列条目 + 专项建议
+    assert '售后服务地址相同 10 分' in xml, '评分构成缺地址加分'
+    assert '[地址]' in xml and '相同的具体地址值' in xml, '摘要缺地址一致条目'
+    assert '经营场所证明' in xml, '缺地址专项建议'
 
 
 def t_match_span_in_ctx_tiers():
@@ -4111,6 +4123,64 @@ def t_generic_admin_account_not_scored():
         assert any(x['type'] == '最后修改人为同一人' and x['severity'] == 'high'
                    for x in cross2), cross2
         assert '最后保存者一致' in res2['metadata']['findings']
+
+
+def t_after_sales_address_shared_is_risk():
+    """供应商售后服务地址是投标人自填值：不同标书的具体地址值相同本身
+    就是围串标证据。曾被四处降级：Category 1 的 联系电话： 标记、格式
+    脚手架的 地址 标签+数字覆盖率、N≥3 份共享同一地址的全局共现门槛
+    （ceil(N*50%)——围标形态恰恰是全体共享，恰被吞掉）、纯地址行实质
+    评分 ~0.47 掉进"疑似模板"档。修复后含具体地址值的段不判模板、实
+    质评分托底 0.6、端到端 substantial。"""
+    f = m._has_concrete_address
+    # 正例：售后/注册/网点标签 + 具体区位门牌值（全部用守卫白名单里的
+    # 合成地址——「某路某号」风格，不含任何真实门牌）
+    assert f('售后服务网点：北京市海淀区某路某号')
+    assert f('供应商售后服务地址：北京市朝阳区建国路88号院6号')
+    assert f('注册地址：北京市海淀区上地十街10号')
+    # 反例：买方地址（每份标书必含，属正常一致）/占位值/无标签纯电话
+    assert not f('招标人地址：北京市海淀区中关村大街1号')
+    assert not f('采购人地址：北京市海淀区上地十街10号')
+    assert not f('售后服务地址：招标人指定')
+    assert not f('交货地点：项目所在地')
+    # 模板过滤器：含地址值的联系段不再被 联系电话：/联系人： 标记整段
+    # 判模板；纯联系栏（无地址）维持模板判定（电话相同由人员维度比对）
+    addr_line = ('售后服务网点：北京市海淀区某路某号，'
+                 '联系电话：010-88886666，联系人：王伟')
+    assert not m.is_template_content(addr_line)
+    assert not m._is_form_scaffolding_listing(addr_line)
+    assert m.is_template_content('联系电话：010-88886666，传真：010-12345678')
+    # 实质评分托底：纯地址行四维评分 ~0.47，托底后必须过 substantial 门槛
+    assert m._score_substantiality(addr_line) >= 0.6
+
+    # 端到端：3 份标书共享同一售后地址段（全局共现门槛 ceil(3*50%)=3，
+    # 修复前该段进 global_templates 被 Filter 3 吞掉）——必须 substantial
+    shared = ('售后服务承诺：本公司设有直属售后服务机构，售后服务网点：'
+              '北京市海淀区中关村大街1号，售后服务电话：010-88886666，'
+              '联系人：王伟，邮政编码100080，维修工程师均持证上岗，'
+              '接到报修通知后2小时内响应，24小时内到达现场。')
+    docs = {
+        '甲公司.txt': shared + '本公司成立于二〇〇八年，主营分析仪器销售与维修。' + '甲公司技术团队深耕行业多年。' * 3,
+        '乙公司.txt': shared + '乙公司专注实验室设备维保服务十年。' + '乙公司服务网络覆盖华东华南。' * 3,
+        '丙公司.txt': shared + '丙公司为高新技术企业，设有备件库房。' + '丙公司维保流程规范响应及时。' * 3,
+    }
+    res = m.text_similarity_analysis(docs)
+    segs = [mm for pr in res['pair_results'] for mm in pr['matches']]
+    hits = [mm for mm in segs if '售后服务网点' in str(mm.get('text', ''))]
+    assert hits, '共享售后地址段未进入匹配结果'
+    assert all(mm.get('risk_level') == 'substantial' and mm.get('abnormal') for mm in hits), \
+        [mm.get('risk_level') for mm in hits]
+    assert any('具体地址值' in r for mm in hits for r in (mm.get('reasons') or [])), \
+        'reasons 未标注具体地址值'
+    # 加分链路：同一地址跨 3 对文件重复命中，去重后 address_same_count=1；
+    # findings 出现地址一致提示；run_full_analysis 据此加固定分
+    assert res.get('address_same_count') == 1, res.get('address_same_count')
+    assert any('相同的具体地址值' in str(x) for x in res.get('findings') or []), res.get('findings')
+    bonus = m._address_same_bonus(res)
+    assert bonus == m.CONFIG.get('address_same_bonus') and bonus > 0, bonus
+    assert m._address_same_bonus({}) == 0
+    assert m._address_same_bonus(None) == 0
+    assert m._address_same_bonus({'address_same_count': 0}) == 0
 
 
 def t_form_scaffolding_listing_template():

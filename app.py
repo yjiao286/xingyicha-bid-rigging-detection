@@ -205,6 +205,9 @@ CONFIG = {
     'subst_score_high': 0.6,        # >= this → substantial (collusion evidence)
     'subst_score_suspicious': 0.3,  # >= this → suspicious (shown but demoted)
     'subst_len_penalty_threshold': 200,  # chars; shorter segments get a length penalty
+    # 售后服务/注册地址相同专项加分：具体地址值是投标人自填字段，跨标书
+    # 一致属强指向性证据（与联系人电话相同同级），单独计分
+    'address_same_bonus': 10,
     # ── Pricing ──
     'min_price_val': 100,           # ignore price-like values below this
     'min_large_price': 5000,        # higher threshold for global-search prices
@@ -7016,6 +7019,64 @@ def _is_standard_listing(text, norm=None):
 # 脚手架词汇+形态（数字/年份/括号单位注记）覆盖占比判定，占比门槛取
 # 更高的 0.75——含实质选项（品牌、产地值、参数选择）的行到不了门槛，
 # 仍走正常评分。
+# ── Concrete bidder-address value ──
+# 供应商售后服务/注册/经营地址是投标人自填值：标签一致不奇怪（招标人
+# 统一格式），值一致——跨标书同一具体地址——本身就是围串标证据
+# （2026-10 用户实测：售后服务地址相同的段落被三处模板过滤器降级：
+# Category 1 的 联系电话： 标记、格式脚手架的 地址 标签+数字覆盖率、
+# N≥3 份标书共享同一地址时的全局共现门槛——后者恰是围标形态本身）。
+# 该守卫让"含具体地址值"的匹配段不被整段判模板；招标人（买方）自己
+# 的地址除外——每份标书都引用它属正常一致（有参照文件时另由 Filter 1
+# 兜底）。匹配段只在两份标书逐字一致时才产生，所以地址值一致必是
+# 值本身相同，不存在"标签相同值不同被误放行"的路径。
+_ADDRESS_LABEL_RE = re.compile(
+    r'[\u4e00-\u9fff]{0,6}(?:地址|网点|场所)[：:]([^\s，,；;、\n]{4,50})')
+_BUYER_ADDR_RE = re.compile(
+    r'(?:招标人|采购人|买方|业主|代理)[\u4e00-\u9fff]{0,4}(?:地址|网点|场所)[：:]')
+_ADDRESS_VALUE_TOKENS = ('省', '市', '区', '县', '旗', '镇', '乡', '村', '街道',
+                         '街', '路', '道', '大道', '巷', '号', '栋', '幢', '楼',
+                         '层', '室', '座', '园', '院', '苑', '广场', '中心',
+                         '开发区', '高新区', '工业园', '园区', '大厦')
+_BUYER_ADDR_PREFIXES = ('招标人', '采购人', '买方', '业主', '代理')
+
+
+def _has_concrete_address(text):
+    """True when the text carries a filled-in concrete address value.
+
+    判定 = 地址/网点/场所标签（≤6 字前缀，如 售后服务/维修/注册/公司）
+    后跟 ≥4 字符的值，值内含 ≥2 个区位/门牌形态词（或 ≥1 个且带数字）。
+    '招标人指定'、'项目所在地'、'全国各地' 这类占位值不含形态词，不会
+    触发；买方（招标人/采购人等）自己的地址跳过——每份标书都引用它属
+    正常一致。买方词可能被标签正则的 ≤6 字前缀吞进匹配 span，也可能
+    落在 span 之外更长前缀里，两处都查。
+    """
+    if not text:
+        return False
+    buyer_spans = [b.span() for b in _BUYER_ADDR_RE.finditer(text)]
+    for mt in _ADDRESS_LABEL_RE.finditer(text):
+        if any(bs < mt.end() and be > mt.start() for bs, be in buyer_spans):
+            continue
+        prefix = text[max(0, mt.start() - 8):mt.start()]
+        if any(k in prefix for k in _BUYER_ADDR_PREFIXES):
+            continue
+        value = mt.group(1)
+        tokens = sum(1 for tk in _ADDRESS_VALUE_TOKENS if tk in value)
+        if tokens >= 2 or (tokens >= 1 and re.search(r'\d', value)):
+            return True
+    return False
+
+
+def _address_same_bonus(similarity_result):
+    """售后服务/注册地址相同 → 固定加分（CONFIG['address_same_bonus']）。
+
+    text_similarity_analysis 在 findings 阶段统计 address_same_count（按
+    归一化文本去重——同一地址跨多对文件重复出现只计一次）；run_full_
+    analysis 据此加分。"""
+    if (similarity_result or {}).get('address_same_count'):
+        return int(CONFIG.get('address_same_bonus') or 0)
+    return 0
+
+
 _FORM_SCAFFOLD_TERMS = [
     # 报价/货物表列名
     '序号', '货物名称', '品名', '名称及规格', '品牌', '产地', '原产地',
@@ -7069,6 +7130,10 @@ def _is_form_scaffolding_listing(text, norm=None):
     `norm` may carry the caller's _normalize_for_match(text) result."""
     if not text:
         return False
+    # 含具体地址值的段不是"格式脚手架主导"——标签是招标人格式，值是投
+    # 标人自填的；值相同即证据（见 _has_concrete_address 注释）。
+    if _has_concrete_address(text):
+        return False
     t = norm if norm is not None else _normalize_for_match(text)
     if len(t) < 10:
         return False
@@ -7116,8 +7181,21 @@ def is_template_content(text, norm=None):
         '开户银行：', '账号：', '银行账号：',
         '纳税人识别号：', '统一社会信用代码：',
     ]
+    # 值携带型标记：这些标签后面跟的是投标人自填值（电话/账号/地址）。
+    # 段内同时含具体地址值时，整段是联系信息证据而非格式栏（2026-10：
+    # 售后服务网点行 = 地址+电话+联系人，曾被 联系电话： 标记整段判模
+    # 板降级）——不当模板。仅标签或仅电话的段落维持模板判定（电话相
+    # 同由人员维度比对）。
+    value_carrying_markers = {
+        '投标人地址', '投标人电话', '投标人传真',
+        '联系人：', '联系电话：', '传真：',
+        '开户银行：', '账号：', '银行账号：',
+        '纳税人识别号：', '统一社会信用代码：',
+    }
     for marker in signature_markers:
         if marker in text_stripped:
+            if marker in value_carrying_markers and _has_concrete_address(text_stripped):
+                continue
             return True
 
     # ── Category 2: Bid announcement fixed phrases ──
@@ -7373,6 +7451,12 @@ def _score_substantiality(text):
         bp_penalty = min(1.0, bp_density / 0.06)  # Full penalty
     score += (1.0 - bp_penalty) * 0.15
 
+    # 含具体地址值的段有实质下限：纯地址行短、无技术词，四维评分只有
+    # ~0.47，会掉进 0.3-0.6 的"疑似模板"档——但地址值一致本身就是证据
+    # （见 _has_concrete_address 注释），托底到 substantial 门槛。
+    if _has_concrete_address(text):
+        score = max(score, 0.6)
+
     return round(score, 3)
 
 
@@ -7385,6 +7469,8 @@ def classify_abnormal_reason(text):
         reasons.append('含有非标准机器翻译痕迹')
     if re.search(r'\d+\.\d+\.\d+', text):
         reasons.append('包含不规范编号标记')
+    if _has_concrete_address(text):
+        reasons.append('含相同的具体地址值（售后服务/注册/经营等投标人自填地址）')
     if len(text) > 80 and not is_template_content(text):
         reasons.append('长段落逐字相同，排除独立编制的可能性')
     return reasons if reasons else ['内容异常一致']
@@ -7762,7 +7848,11 @@ def text_similarity_analysis(texts_dict, ref_texts_list=None, on_progress=None,
                     continue
 
                 # ── Filter 3: Global cross-file concurrence (Type A) ──
-                if _is_in_global_template(seg_text, global_templates, seg_norm):
+                # 含具体地址值的段豁免：围标形态恰恰是 N 份标书共享同一
+                # 售后服务/注册地址，50% 共现门槛会精准吞掉这条证据
+                # （值一致是投标人自己填出来的，不是行业通用文本）。
+                if (not _has_concrete_address(seg_text)
+                        and _is_in_global_template(seg_text, global_templates, seg_norm)):
                     pair_result['template_count'] += 1
                     results['template_matches'] += 1
                     global_template_count += 1
@@ -7977,6 +8067,29 @@ def text_similarity_analysis(texts_dict, ref_texts_list=None, on_progress=None,
         results['findings'].append('存在相同的不规范翻译表述（机器翻译痕迹），排除独立编制可能')
     if any('技术型号' in str(r.get('reasons', [])) for r in results['substantial_abnormal']):
         results['findings'].append('技术方案中具体型号/参数选择一致，不属于通用技术规范')
+
+    # 售后服务/注册地址相同：高风险段里含具体地址值的单独计数并出
+    # findings（run_full_analysis 据此加 address_same_bonus 分）。按归一
+    # 化文本去重——同一地址跨多对文件重复命中只计一次，多个不同地址
+    # 各计一次。
+    seen_addr = set()
+    unique_addr = []
+    for e in results['substantial_abnormal']:
+        body = str(e.get('text', ''))
+        if not _has_concrete_address(body):
+            continue
+        k = _normalize_for_match(body)[:80]
+        if k in seen_addr:
+            continue
+        seen_addr.add(k)
+        unique_addr.append(e)
+    results['address_same_count'] = len(unique_addr)
+    if unique_addr:
+        e0 = unique_addr[0]
+        more = f' 等共 {len(unique_addr)} 处不同地址' if len(unique_addr) > 1 else ''
+        results['findings'].append(
+            f'{e0.get("pair")} 存在相同的具体地址值（售后服务/注册/经营地址）: '
+            f'{str(e0.get("text", ""))[:60]}…{more}')
 
     return results
 
@@ -9210,6 +9323,12 @@ def run_full_analysis(filepaths, ref_filepaths=None, group_map=None, group_texts
         hard_synergy_bonus = 5
         total_score += hard_synergy_bonus
 
+    # 售后服务/注册地址相同加分：具体地址值是投标人自填字段，跨标书
+    # 一致属强指向性证据（与联系人电话相同同级）——地址段即使只算软
+    # 证据（第（四）项-a，权重 5），地址这一事实本身也值得单独计分
+    address_bonus = _address_same_bonus(similarity)
+    total_score += address_bonus
+
     # 协同加分可能使总分超过100（如全维度强+硬协同），封顶于满分
     total_score = min(max_score, round(total_score, 1))
 
@@ -9274,11 +9393,13 @@ def run_full_analysis(filepaths, ref_filepaths=None, group_map=None, group_texts
             'max_score': max_score,
             'synergy_bonus': synergy_bonus,
             'hard_synergy_bonus': hard_synergy_bonus,
+            'address_bonus': address_bonus,
             'scoring_rule': {
                 'weights': clause_weights,
                 'level_multipliers': level_score_map,
                 'synergy_bonus': 1,
                 'hard_synergy_bonus': 5,
+                'address_bonus': int(CONFIG.get('address_same_bonus') or 0),
                 'thresholds': {'high': 50, 'medium': 15, 'low': 0}
             }
         }
@@ -9349,6 +9470,9 @@ _REPORT_CLAUSE_ADVICE = {
 # 附加线索处置建议：银行账号交叉（对应条例第四十条第六项的核查方向，系统不自动判定）
 _REPORT_BANK_ADVICE = ('出现同一银行账号：结合投标保证金缴纳凭证核查资金来源与流向，'
                        '确认是否存在保证金从同一单位或个人账户转出的情形（实施条例第四十条第六项）；')
+_REPORT_ADDRESS_ADVICE = ('出现相同的具体地址值（售后服务/注册/经营地址）：核实相关投标人'
+                          '是否共用经营场所或存在关联关系，可要求双方提供经营场所证明'
+                          '（房产/租赁凭证）并比对实际办公情况；')
 
 _REPORT_NOTES = [
     '本报告由围串标风险识别系统基于文件元数据、人员信息、文本相似度与报价规律的自动化比对生成，仅供招标评审与监管核查参考；',
@@ -9631,6 +9755,7 @@ def generate_report_docx(analysis):
     conclusion = verdict_section.get('conclusion') or '-'
     synergy_bonus = verdict_section.get('synergy_bonus') or 0
     hard_synergy_bonus = verdict_section.get('hard_synergy_bonus') or 0
+    address_bonus = verdict_section.get('address_bonus') or 0
     level_text = _LEVEL_TEXT.get(conclusion_level, conclusion_level)
 
     # ── Title block ──
@@ -9661,6 +9786,8 @@ def generate_report_docx(analysis):
         bonus_parts.append(f'软证据协同 +{synergy_bonus}分')
     if hard_synergy_bonus:
         bonus_parts.append(f'硬证据协同 +{hard_synergy_bonus}分')
+    if address_bonus:
+        bonus_parts.append(f'售后服务地址相同 +{address_bonus}分')
     doc.add_paragraph(
         f'条款命中: 满足 {satisfied_n} 项 · 无法判断 {uncertain_n} 项 · 不满足 {not_n} 项'
         f'；协同加分: {"，".join(bonus_parts) if bonus_parts else "无"}')
@@ -9698,6 +9825,11 @@ def generate_report_docx(analysis):
         if m.get('severity') == 'high':
             pair = f'（{m.get("pair")}）' if m.get('pair') else ''
             key_risks.append(('元数据', f'{m.get("field")}: {m.get("value")}{pair}'))
+    # 地址一致单列（不与 substantial[:3] 竞争名额）——自填值相同是独立信号
+    addr_finding = next((str(x) for x in (similarity_section.get('findings') or [])
+                         if '相同的具体地址值' in str(x)), '')
+    if addr_finding:
+        key_risks.append(('地址', addr_finding))
     for e in (similarity_section.get('substantial_abnormal') or [])[:3]:
         loc1 = _match_page_label(e, 1)
         loc2 = _match_page_label(e, 2)
@@ -9959,6 +10091,7 @@ def generate_report_docx(analysis):
             f'评分构成: 条款得分合计 {base_score:g} 分'
             + (f' + 软证据协同 {synergy_bonus} 分' if synergy_bonus else '')
             + (f' + 硬证据协同 {hard_synergy_bonus} 分' if hard_synergy_bonus else '')
+            + (f' + 售后服务地址相同 {address_bonus} 分' if address_bonus else '')
             + f' = 总分 {score} 分（满分 {max_score} 分）'
         )
         r.font.bold = True
@@ -10005,6 +10138,11 @@ def generate_report_docx(analysis):
             '硬证据协同加分: 第（一）项 与 第（二）项 同为"强"时 +5分（文档同源+投标事宜同人双重确认）',
             style='List Bullet'
         )
+        doc.add_paragraph(
+            '售后服务地址相同加分: 跨标书出现相同的具体地址值（售后服务/注册/经营'
+            '地址等投标人自填字段）时 +10分',
+            style='List Bullet'
+        )
         doc.add_paragraph('总分上限100分', style='List Bullet')
 
     # ── 7. Conclusion & advice ──
@@ -10027,6 +10165,8 @@ def generate_report_docx(analysis):
     ]
     if any(m.get('type') == '银行账号相同' for m in cross_matches):
         clause_advice.append(_REPORT_BANK_ADVICE)
+    if address_bonus:
+        clause_advice.append(_REPORT_ADDRESS_ADVICE)
     if clause_advice:
         doc.add_paragraph('针对本次命中情形的专项建议:', style='List Bullet')
         for a in clause_advice:
@@ -10104,6 +10244,9 @@ def generate_risk_report_docx(analysis):
     conclusion = verdict_section.get('conclusion') or '-'
     level_text = _LEVEL_TEXT.get(conclusion_level, conclusion_level)
     level_color = _LEVEL_COLORS.get(conclusion_level)
+    synergy_bonus = verdict_section.get('synergy_bonus') or 0
+    hard_synergy_bonus = verdict_section.get('hard_synergy_bonus') or 0
+    address_bonus = verdict_section.get('address_bonus') or 0
 
     # ── Title block ──
     title = doc.add_heading('围串标风险摘要报告', level=0)
@@ -10145,6 +10288,18 @@ def generate_risk_report_docx(analysis):
             _emphasize_cell(trow.cells[2], color=_SAT_TXT_COLORS.get(trow.cells[2].text.strip()))
             if trow.cells[3].text.strip() == '强':
                 _emphasize_cell(trow.cells[3], color=_RED)
+    # 评分构成（与详细报告同式）：地址相同是专项加分，审核人须能看出
+    # 分数里含这条
+    base_score = round(sum(c.get('_score') or 0 for c in clauses), 1)
+    p = doc.add_paragraph()
+    r = p.add_run(
+        f'评分构成: 条款得分合计 {base_score:g} 分'
+        + (f' + 软证据协同 {synergy_bonus} 分' if synergy_bonus else '')
+        + (f' + 硬证据协同 {hard_synergy_bonus} 分' if hard_synergy_bonus else '')
+        + (f' + 售后服务地址相同 {address_bonus} 分' if address_bonus else '')
+        + f' = 总分 {score} 分（满分 {max_score} 分）'
+    )
+    r.font.bold = True
 
     # ── 2. Key risks summary ──
     severe_matches = [m for m in cross_matches if m.get('severity') in ('critical', 'high')]
@@ -10157,6 +10312,11 @@ def generate_risk_report_docx(analysis):
         if m.get('severity') == 'high':
             pair = f'（{m.get("pair")}）' if m.get('pair') else ''
             key_risks.append(('元数据', f'{m.get("field")}: {m.get("value")}{pair}'))
+    # 地址一致单列（不与 substantial[:5] 竞争名额）——自填值相同是独立信号
+    addr_finding = next((str(x) for x in (similarity_section.get('findings') or [])
+                         if '相同的具体地址值' in str(x)), '')
+    if addr_finding:
+        key_risks.append(('地址', addr_finding))
     for e in (similarity_section.get('substantial_abnormal') or [])[:5]:
         loc1 = _match_page_label(e, 1)
         loc2 = _match_page_label(e, 2)
@@ -10289,6 +10449,8 @@ def generate_risk_report_docx(analysis):
     ]
     if any(m.get('type') == '银行账号相同' for m in cross_matches):
         clause_advice.append(_REPORT_BANK_ADVICE)
+    if address_bonus:
+        clause_advice.append(_REPORT_ADDRESS_ADVICE)
     if clause_advice:
         doc.add_paragraph('针对本次命中情形的专项建议:', style='List Bullet')
         for a in clause_advice:
