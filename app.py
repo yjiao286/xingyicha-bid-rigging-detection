@@ -27,6 +27,7 @@ from flask import Flask, request, jsonify, send_file, render_template, Response
 # werkzeug.utils.secure_filename would strip.
 from docx import Document
 from docx.shared import Pt, RGBColor
+from docx.enum.text import WD_COLOR_INDEX
 from docx.oxml.ns import qn
 from pypdf import PdfReader
 import olefile
@@ -9503,6 +9504,100 @@ def _sanitize_filename_component(s, max_len=40):
     return s[:max_len].strip()
 
 
+def _match_span_in_ctx(ctx, match_text, full_len=None):
+    """Locate the matched fragment inside a context string, for highlighting.
+
+    返回 (start, end) 原文区间；定位失败返回 None（调用方按普通文本渲染）。
+    与前端 renderContextWithHighlight（main.js）是同一套定位策略，改动须
+    两侧同步：① 归一化后精确子串；② 头部 16 字锚定；③ 最长公共子串锚点
+    （≥8 字）向两侧扩展到匹配全长——近似段落的对面文本存在零散差异，
+    没有一段完整 needle 落在里面，靠锚点把整个匹配区域照亮。
+    """
+    if not ctx or not match_text:
+        return None
+    cm_s, cm_p = _build_normalized_map(ctx)
+    if not cm_s or not cm_p:
+        return None
+    needle = _build_normalized_map(str(match_text))[0]
+    if not needle:
+        return None
+    want = int(full_len) if isinstance(full_len, (int, float)) and full_len > len(needle) \
+        else len(needle)
+    start = cm_s.find(needle)
+    if start < 0:
+        head = needle[:min(16, len(needle))]
+        start = cm_s.find(head)
+    if start < 0:
+        # LCS anchor via rolling DP over needle × normalized ctx
+        best_start, best_len = -1, 0
+        nl, cl = len(needle), len(cm_s)
+        dp = [0] * (cl + 1)
+        for i in range(1, nl + 1):
+            prev = 0
+            for j in range(1, cl + 1):
+                tmp = dp[j]
+                if needle[i - 1] == cm_s[j - 1]:
+                    dp[j] = prev + 1
+                    if dp[j] > best_len:
+                        best_len = dp[j]
+                        best_start = j - dp[j]
+                else:
+                    dp[j] = 0
+                prev = tmp
+        if best_len >= 8 and best_start >= 0:
+            start = best_start - min(best_start, (want - best_len) // 2)
+    if start < 0:
+        return None
+    end = min(start + want, len(cm_s))
+    if end <= start:
+        end = start + 1
+    return cm_p[start], cm_p[end - 1] + 1
+
+
+def _similarity_compare_table(doc, hdr1, hdr2, side1, side2):
+    """Risk-report side-by-side table with the matched fragment highlighted.
+
+    表头两格为「文件名（位置）」；内容格渲染该侧实际文本，其中相同/
+    近似片段以黄色高亮标出（与前端定位弹窗一致）。side = (ctx 文本,
+    匹配片段文本, 匹配全长)；高亮定位失败时整格按普通文本渲染，绝不
+    因高亮丢内容。
+    """
+    table = doc.add_table(rows=2, cols=2)
+    try:
+        table.style = 'Table Grid'
+    except Exception:
+        pass
+    for cell, hdr in ((table.rows[0].cells[0], hdr1), (table.rows[0].cells[1], hdr2)):
+        cell.text = str(hdr)
+        for para in cell.paragraphs:
+            for run in para.runs:
+                run.bold = True
+    for cell, (ctx, match_text, full_len) in zip(
+            (table.rows[1].cells[0], table.rows[1].cells[1]), (side1, side2)):
+        body = str(ctx or '').replace('\n', ' ').strip() or '-'
+        para = cell.paragraphs[0]
+        span = None
+        if body != '-':
+            span = _match_span_in_ctx(body, match_text, full_len)
+        if span:
+            s, e = span
+            if s > 0:
+                para.add_run(body[:s])
+            hi = para.add_run(body[s:e])
+            hi.font.highlight_color = WD_COLOR_INDEX.YELLOW
+            if e < len(body):
+                para.add_run(body[e:])
+        else:
+            para.add_run(body)
+    # 表格统一五号字（与 _report_table 一致）
+    for trow in table.rows:
+        for cell in trow.cells:
+            for para in cell.paragraphs:
+                for run in para.runs:
+                    run.font.size = Pt(10.5)
+    return table
+
+
 def generate_report_docx(analysis):
     """Generate a comprehensive .docx report from analysis results.
 
@@ -10118,7 +10213,8 @@ def generate_risk_report_docx(analysis):
     doc.add_paragraph(
         f'高风险异常段落 {total_substantial} 处，疑似模板段落 {total_suspicious} 处。'
         '以下逐条列出双侧对照：每个表格左右两列分别为两份文件的实际文本，'
-        '表头标注文件名与位置，可按位置直接回到原件核验。')
+        '表头标注文件名与位置，两文件相同/近似的片段以黄色高亮标出，'
+        '可按位置直接回到原件核验。')
     pairs_with_abnormal = []
     for pr in pair_results:
         abnormal = [m for m in (pr.get('matches') or []) if m.get('abnormal')]
@@ -10154,14 +10250,19 @@ def generate_risk_report_docx(analysis):
                 if reasons:
                     p.add_run(f'　判定依据: {reasons}')
                 # 双侧对照表：表头为文件名+定位（审核人单看一张表即可知道
-                # 两侧各出自哪份文件、在原件何处），内容行为两侧实际文本。
+                # 两侧各出自哪份文件、在原件何处），内容行为两侧实际文本，
+                # 相同/近似片段黄色高亮（与前端定位弹窗同一套定位策略）。
                 # 用 ctx1/ctx2（匹配段±前后文，各 ≤400 字符）——实时与历史
                 # 链路长度一致，报告形态稳定。
-                c1 = str(m.get('ctx1') or m.get('text') or '').replace('\n', ' ').strip() or '-'
-                c2 = str(m.get('ctx2') or m.get('text') or '').replace('\n', ' ').strip() or '-'
-                _report_table(doc, [f'{f1n}（{_match_page_label(m, 1)}）',
-                                    f'{f2n}（{_match_page_label(m, 2)}）'],
-                              [[c1, c2]])
+                m_text = str(m.get('text') or '')
+                c1 = str(m.get('ctx1') or m_text or '').replace('\n', ' ').strip() or '-'
+                c2 = str(m.get('ctx2') or m_text or '').replace('\n', ' ').strip() or '-'
+                _similarity_compare_table(
+                    doc,
+                    f'{f1n}（{_match_page_label(m, 1)}）',
+                    f'{f2n}（{_match_page_label(m, 2)}）',
+                    (c1, m_text, m.get('length')),
+                    (c2, m_text, m.get('length')))
             if hidden > 0:
                 doc.add_paragraph(f'另有 {hidden} 处异常一致段落未列出，详见详细报告或在系统中查看。')
             doc.add_paragraph(

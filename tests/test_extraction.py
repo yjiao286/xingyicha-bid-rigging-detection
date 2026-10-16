@@ -2798,9 +2798,9 @@ def _risk_report_fixture():
                     {'index': 2, 'length': 80, 'abnormal': True, 'near_duplicate': True,
                      'risk_level': 'substantial', 'score': 0.85,
                      'reasons': ['高度近似段落（相似度85%，仅少量字词差异）'],
-                     'text': '甲侧近似段落内容',
-                     'ctx1': '甲侧近似段落全文内容',
-                     'ctx2': '乙侧近似段落全文内容',
+                     'text': '甲公司餐饮服务管理方案近似段落内容',
+                     'ctx1': '甲公司餐饮服务管理方案近似段落内容，特此承诺。',
+                     'ctx2': '乙公司餐饮服务管理方案近似段落内容，与左侧仅少量字词差异',
                      'page1': None, 'page2': None, 'pct1': 37, 'pct2': 41},
                 ]}],
             'substantial_abnormal': [
@@ -2828,11 +2828,17 @@ def t_risk_report_similarity_side_by_side():
         xml = z.read('word/document.xml').decode('utf-8')
     assert '围串标风险摘要报告' in xml, '风险摘要报告标题缺失'
     assert '文本相似度异常对照' in xml, '相似度对照章节缺失'
-    # 逐字相同段（#1）：两侧上下文都要渲染
-    assert '甲侧前文甲侧逐字相同段落内容甲侧后文' in xml, '文件1 侧上下文缺失'
-    assert '乙侧前文甲侧逐字相同段落内容乙侧后文' in xml, '文件2 侧上下文缺失'
-    # 高度近似段（#2）：两侧段落文本都要渲染
-    assert '甲侧近似段落全文内容' in xml and '乙侧近似段落全文内容' in xml, '近似段双侧内容缺失'
+    # 逐字相同段（#1）：两侧上下文都要渲染。黄色高亮会把格内文本拆成
+    # 多个 run（前缀/高亮/后缀），不能再断言整段连续字符串。
+    for frag in ('甲侧前文', '甲侧逐字相同段落内容', '甲侧后文',
+                 '乙侧前文', '乙侧后文'):
+        assert frag in xml, f'对照片段缺失: {frag}'
+    # 高度近似段（#2）：两侧段落文本都要渲染（文件2 侧走 LCS 锚点定位）
+    assert '甲公司餐饮服务管理方案近似段落内容' in xml, '文件1 侧近似段缺失'
+    assert '乙公司餐饮服务管理方案近似段落内容' in xml, '文件2 侧近似段缺失'
+    # 相同/近似片段黄色高亮：2 条 × 两侧 = 4 处（与前端定位弹窗一致）
+    n_hi = xml.count('<w:highlight')
+    assert n_hi == 4, f'高亮数量异常: {n_hi}'
     # 定位表头直接用文件名（不是"文件1/文件2"侧别）：PDF 页码 + 相对
     # 位置百分比两种形态
     assert '甲公司.docx（第12页）' in xml and '乙公司.docx（第15页）' in xml, '页码定位表头缺失'
@@ -2841,6 +2847,24 @@ def t_risk_report_similarity_side_by_side():
     # 摘要、结论与处置建议照常渲染
     assert '主要风险点摘要' in xml and '高度怀疑存在围标串标行为' in xml
     assert '结论与处置建议' in xml and '处置建议' in xml and '总体建议' in xml, '结论与建议章节缺失'
+
+
+def t_match_span_in_ctx_tiers():
+    # 报告高亮定位与前端 renderContextWithHighlight 同一套三级策略
+    # （改动须两侧同步）：① 精确子串 ② 头部 16 字锚定 ③ 最长公共子串
+    # 锚点（≥8 字）扩展；全落空返回 None，绝不抛异常。
+    f = m._match_span_in_ctx
+    ctx = '前文甲乙丙丁戊己庚辛后文'
+    assert f(ctx, '甲乙丙丁戊己庚辛') == (2, 10)  # ① 精确
+    needle2 = '甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未'  # 18 字
+    ctx2 = '前文' + needle2[:17] + '尾部改写'  # 尾部漂移，头部可锚定
+    s2, e2 = f(ctx2, needle2)
+    assert s2 == 2 and e2 - s2 >= 17, (s2, e2)  # ② 头部锚定 + want 扩展
+    # ③ 近似段：对面文本零散差异，靠 LCS 锚点（此处公共串 10 字）把整个
+    # 匹配区域照亮——从锚点向两侧扩展到 needle 全长 11（本例 right-only）
+    assert f('乙公司餐饮服务管理方案差异', '甲公司餐饮服务管理方案') == (1, 12)
+    assert f('完全不同的内容', '毫无交集xyz') is None
+    assert f('', 'x') is None and f('x', '') is None
 
 
 def t_report_endpoint_mode_dispatch():
