@@ -2056,3 +2056,27 @@ svg.ico {
 .ico-dot.d { background: #dc2626; }
 .ico-dot.w { background: #d97706; }
 .ico-dot.g { background: #16a34a; }
+
+/* 条款卡跳转定位：目标匹配卡强提示闪烁（地址加分卡 → 地址证据段）。
+   必须放在样式表末尾并用 .text-match-item.jump-flash 复合选择器——
+   结果卡片的阶梯入场动画（.text-match-item:nth-child(n+2) 的 riseIn）
+   与之同特异性但排在前面，普通 .jump-flash 会被入场动画覆盖
+   （实测 animation-name 仍是 riseIn、光环不生效）。卡片自身与内部
+   内容区都有背景（白 + 浅灰），只闪父级背景会被子元素盖住——外层用
+   琥珀色光环（box-shadow 画在卡外、不被覆盖）并闪卡片底色，内外同步，
+   共 3 个周期约 3.6s（JS 侧 4000ms 后移除类，改动须同步）。 */
+.text-match-item.jump-flash {
+  position: relative; z-index: 5;
+  animation: jumpFlash 1.2s ease-in-out 3;
+}
+.text-match-item.jump-flash .text-match-content {
+  animation: jumpFlashInner 1.2s ease-in-out 3;
+}
+@keyframes jumpFlash {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0); background: var(--bg-surface); }
+  35%, 65% { box-shadow: 0 0 0 4px #f59e0b, 0 6px 24px rgba(245, 158, 11, .45); background: #fef3c7; }
+}
+@keyframes jumpFlashInner {
+  0%, 100% { background: var(--bg-subtle); border-color: var(--border-light); }
+  35%, 65% { background: #fde68a; border-color: #f59e0b; }
+}

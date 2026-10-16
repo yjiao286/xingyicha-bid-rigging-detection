@@ -797,7 +797,8 @@ function renderVerdict() {
         <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:12px;">
           ${v.synergy_bonus > 0 ? `<span class="bonus-badge soft">软协同 +${v.synergy_bonus}</span>` : ''}
           ${v.hard_synergy_bonus > 0 ? `<span class="bonus-badge hard">硬证据协同 +${v.hard_synergy_bonus}</span>` : ''}
-          ${!(v.synergy_bonus > 0) && !(v.hard_synergy_bonus > 0) ? '<span style="font-size:12px;color:var(--text-muted);">无协同加分</span>' : ''}
+          ${v.address_bonus > 0 ? `<span class="bonus-badge hard">售后服务地址相同 +${v.address_bonus}</span>` : ''}
+          ${!(v.synergy_bonus > 0) && !(v.hard_synergy_bonus > 0) && !(v.address_bonus > 0) ? '<span style="font-size:12px;color:var(--text-muted);">无协同加分</span>' : ''}
         </div>
       </div>
     </div>
@@ -825,6 +826,7 @@ function renderVerdict() {
           <li>无法判断 / 无 = 0</li>
           <li>软协同加分：第（四）项-a 和 -b 同时为"强" 时 +1分</li>
           <li>硬证据协同加分：第（一）项 与 第（二）项 同为"强" 时 +5分（文档同源+投标事宜同人双重确认）</li>
+          <li>售后服务地址相同加分：跨标书出现相同的具体地址值（售后服务/注册/经营地址等投标人自填字段）时 +10分</li>
           <li>总分上限 100分</li>
         </ul>
         <p class="rules-block-title">综合结论阈值：</p>
@@ -882,6 +884,25 @@ function renderVerdict() {
     }
     html += '</div>';
   });
+
+  // 专项加分卡（非条款）：跨标书售后服务/注册地址相同——具体地址值是
+  // 投标人自填字段，值一致单独计分；点击直接落到含地址值的那条匹配卡
+  // （jumpToAddressEvidence 展开折叠对与分页并闪烁标记）
+  if (v.address_bonus > 0) {
+    const sim = analysisResult.text_similarity || {};
+    const addrFinding = (sim.findings || []).find(f => String(f).indexOf('相同的具体地址值') >= 0);
+    html += `<div class="clause-card satisfied" onclick="jumpToAddressEvidence()" style="cursor:pointer;">
+      <div class="clause-header">
+        <span class="clause-index">+</span>
+        <strong style="font-size:14px;">售后服务地址相同</strong>
+        <span class="clause-tag tag-satisfied">专项加分</span>
+        <span class="clause-score-badge">+${v.address_bonus}分</span>
+        <span style="font-size:10px;color:var(--accent-dim);margin-left:4px;">查看证据 →</span>
+      </div>
+      ${addrFinding ? `<ul class="clause-evidence"><li>${escapeHtml(String(addrFinding))}</li></ul>` : ''}
+      <span class="evidence-level level-strong">证据强度: 强</span>
+    </div>`;
+  }
   document.getElementById('clausesGrid').innerHTML = html;
 }
 
@@ -1914,6 +1935,57 @@ function scrollToPair(idx) {
     }
     updateSmartToggleBtn();
   }
+}
+
+// 地址加分卡跳转：切到相似度页后直接落到含具体地址值的那条匹配卡——
+// 后端 classify_abnormal_reason 给地址段统一标了「具体地址值」reason，
+// 前端据此找到目标 pair；展开折叠对、展开「显示全部 N 项」分页、滚动
+// 到该卡并黄色闪烁。找不到目标（旧历史记录无该 reason）时留在页顶，
+// findings 行本身就有地址一致提示。
+function jumpToAddressEvidence() {
+  switchToTab('tab-similarity');
+  const s = (typeof analysisResult !== 'undefined' && analysisResult && analysisResult.text_similarity) || {};
+  let targetPair = -1, targetHead = '';
+  (s.pair_results || []).forEach((pr, pi) => {
+    if (targetPair >= 0) return;
+    (pr.matches || []).forEach(m => {
+      if (targetPair >= 0) return;
+      if ((m.reasons || []).some(r => String(r).indexOf('具体地址值') >= 0)) {
+        targetPair = pi;
+        targetHead = String(m.text || '').substring(0, 16);
+      }
+    });
+  });
+  if (targetPair < 0 || !targetHead) return;
+  // 当前过滤器会隐藏高风险段时重置为全部并重渲染
+  if (_currentSimFilter !== 'all' && _currentSimFilter !== 'substantial') {
+    _currentSimFilter = 'all';
+    renderSimilarity();
+  }
+  const pairId = 'pair-' + targetPair;
+  const body = document.getElementById(pairId + '-body');
+  const toggle = document.getElementById(pairId + '-toggle');
+  if (body) body.style.display = 'block';
+  if (toggle) toggle.textContent = '▼';
+  requestAnimationFrame(() => {
+    const pairBody = document.getElementById(pairId + '-body');
+    if (!pairBody) return;
+    // 目标段可能落在「显示全部 N 项」分页的隐藏区，先全部展开
+    pairBody.querySelectorAll('[id^="' + pairId + '-more-"]').forEach(d => { d.style.display = 'block'; });
+    pairBody.querySelectorAll('button.btn-sm').forEach(b => {
+      if (b.textContent.indexOf('显示全部') >= 0) b.style.display = 'none';
+    });
+    const items = pairBody.querySelectorAll('.text-match-item');
+    for (const it of items) {
+      if (it.textContent.indexOf(targetHead) >= 0) {
+        it.classList.add('jump-flash');
+        it.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        // 与 .jump-flash 动画时长同步（3 周期 × 1.2s）
+        setTimeout(() => it.classList.remove('jump-flash'), 4000);
+        break;
+      }
+    }
+  });
 }
 
 function togglePair(pairId) {
